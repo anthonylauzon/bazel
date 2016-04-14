@@ -28,6 +28,7 @@ import com.google.devtools.build.lib.cmdline.Label;
 import com.google.devtools.build.lib.collect.nestedset.NestedSet;
 import com.google.devtools.build.lib.collect.nestedset.NestedSetBuilder;
 import com.google.devtools.build.lib.packages.BuildType;
+import com.google.devtools.build.lib.packages.RuleClass;
 import com.google.devtools.build.lib.rules.apple.Platform;
 import com.google.devtools.build.lib.rules.cpp.CcToolchainFeatures.FeatureConfiguration;
 import com.google.devtools.build.lib.rules.cpp.CppConfiguration.DynamicMode;
@@ -178,7 +179,7 @@ public final class CcCommon {
   }
 
   public TransitiveLipoInfoProvider collectTransitiveLipoLabels(CcCompilationOutputs outputs) {
-    if (cppConfiguration.getFdoSupport().getFdoRoot() == null
+    if (CppHelper.getFdoSupport(ruleContext).getFdoRoot() == null
         || !cppConfiguration.isLipoContextCollector()) {
       return TransitiveLipoInfoProvider.EMPTY;
     }
@@ -408,6 +409,36 @@ public final class CcCommon {
         ruleContext.attributeError("includes",
             "Path references a path above the execution root.");
       }
+      if (includesPath.segmentCount() == 0) {
+        ruleContext.attributeError(
+            "includes",
+            "'"
+                + includesAttr
+                + "' resolves to the workspace root, which would allow this rule and all of its "
+                + "transitive dependents to include any file in your workspace. Please include only"
+                + " what you need");
+      } else if (!includesPath.startsWith(packageFragment)) {
+        ruleContext.attributeWarning(
+            "includes",
+            "'"
+                + includesAttr
+                + "' resolves to '"
+                + includesPath
+                + "' not below the relative path of its package '"
+                + packageFragment
+                + "'. This will be an error in the future");
+        // TODO(janakr): Add a link to a page explaining the problem and fixes?
+      } else if (!packageFragment.startsWith(RuleClass.THIRD_PARTY_PREFIX)) {
+        ruleContext.attributeWarning(
+            "includes",
+            "'"
+                + includesAttr
+                + "' resolves to '"
+                + includesPath
+                + "' not in '"
+                + RuleClass.THIRD_PARTY_PREFIX
+                + "'. This will be an error in the future");
+      }
       result.add(includesPath);
       result.add(ruleContext.getConfiguration().getGenfilesFragment().getRelative(includesPath));
     }
@@ -432,7 +463,7 @@ public final class CcCommon {
       }
     }
     prerequisites.addTransitive(context.getDeclaredIncludeSrcs());
-    prerequisites.addTransitive(context.getAdditionalInputs());
+    prerequisites.addTransitive(context.getAdditionalInputs(CppHelper.usePic(ruleContext, false)));
     return prerequisites.build();
   }
 
@@ -463,7 +494,10 @@ public final class CcCommon {
         CppFileTypes.LINKER_SCRIPT);
   }
 
-  InstrumentedFilesProvider getInstrumentedFilesProvider(Iterable<Artifact> files,
+  /**
+   * Provides support for instrumentation.
+   */
+  public InstrumentedFilesProvider getInstrumentedFilesProvider(Iterable<Artifact> files,
       boolean withBaselineCoverage) {
     return cppConfiguration.isLipoContextCollector()
         ? InstrumentedFilesProviderImpl.EMPTY

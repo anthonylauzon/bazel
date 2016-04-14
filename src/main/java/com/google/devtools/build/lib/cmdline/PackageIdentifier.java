@@ -60,19 +60,12 @@ public final class PackageIdentifier implements Comparable<PackageIdentifier>, S
     }
   }
 
-  // Temporary factory for identifiers without explicit repositories.
-  // TODO(bazel-team): remove all usages of this.
-  public static PackageIdentifier createInDefaultRepo(String name) {
-    return createInDefaultRepo(new PathFragment(name));
+  public static PackageIdentifier createInMainRepo(String name) {
+    return createInMainRepo(new PathFragment(name));
   }
 
-  public static PackageIdentifier createInDefaultRepo(PathFragment name) {
-    try {
-      return create(DEFAULT_REPOSITORY, name);
-    } catch (LabelSyntaxException e) {
-      throw new IllegalArgumentException("could not create package identifier for " + name
-          + ": " + e.getMessage());
-    }
+  public static PackageIdentifier createInMainRepo(PathFragment name) {
+    return create(MAIN_REPOSITORY_NAME, name);
   }
 
   /**
@@ -136,6 +129,14 @@ public final class PackageIdentifier implements Comparable<PackageIdentifier>, S
     return repository.getPathFragment().getRelative(pkgName);
   }
 
+  public PackageIdentifier makeAbsolute() {
+    if (!repository.isDefault()) {
+      return this;
+    }
+
+    return create(MAIN_REPOSITORY_NAME, pkgName);
+  }
+
   /**
    * Returns the name of this package.
    *
@@ -145,7 +146,7 @@ public final class PackageIdentifier implements Comparable<PackageIdentifier>, S
    */
   @Override
   public String toString() {
-    return (repository.isDefault() ? "" : repository + "//") + pkgName;
+    return (repository.isDefault() || repository.isMain() ? "" : repository + "//") + pkgName;
   }
 
   @Override

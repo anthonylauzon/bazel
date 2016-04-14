@@ -20,9 +20,12 @@ import com.google.common.collect.ImmutableList;
 import com.google.devtools.build.lib.analysis.BlazeDirectories;
 import com.google.devtools.build.lib.analysis.config.BuildConfiguration;
 import com.google.devtools.build.lib.analysis.config.CompilationMode;
+import com.google.devtools.build.lib.cmdline.Label;
 import com.google.devtools.build.lib.concurrent.ThreadSafety.Immutable;
 import com.google.devtools.build.lib.rules.apple.DottedVersion;
 import com.google.devtools.build.lib.rules.objc.ReleaseBundlingSupport.SplitArchTransition.ConfigurationDistinguisher;
+import com.google.devtools.build.lib.skylarkinterface.SkylarkCallable;
+import com.google.devtools.build.lib.skylarkinterface.SkylarkModule;
 import com.google.devtools.build.lib.util.Preconditions;
 import com.google.devtools.build.lib.vfs.Path;
 
@@ -35,6 +38,7 @@ import javax.annotation.Nullable;
 /**
  * A compiler configuration containing flags required for Objective-C compilation.
  */
+@SkylarkModule(name = "objc", doc = "A configuration fragment for Objective-C")
 @Immutable
 public class ObjcConfiguration extends BuildConfiguration.Fragment {
   @VisibleForTesting
@@ -55,6 +59,7 @@ public class ObjcConfiguration extends BuildConfiguration.Fragment {
   private final DottedVersion iosSimulatorVersion;
   private final String iosSimulatorDevice;
   private final boolean generateDebugSymbols;
+  private final boolean generateLinkmap;
   private final boolean runMemleaks;
   private final ImmutableList<String> copts;
   private final CompilationMode compilationMode;
@@ -69,6 +74,7 @@ public class ObjcConfiguration extends BuildConfiguration.Fragment {
   private final boolean useAbsolutePathsForActions;
   private final boolean prioritizeStaticLibs;
   private final boolean debugWithGlibcxx;
+  @Nullable private final Label extraEntitlements;
 
   ObjcConfiguration(ObjcCommandLineOptions objcOptions, BuildConfiguration.Options options,
       @Nullable BlazeDirectories directories) {
@@ -78,6 +84,7 @@ public class ObjcConfiguration extends BuildConfiguration.Fragment {
     this.iosSimulatorVersion =
         Preconditions.checkNotNull(objcOptions.iosSimulatorVersion, "iosSimulatorVersion");
     this.generateDebugSymbols = objcOptions.generateDebugSymbols;
+    this.generateLinkmap = objcOptions.generateLinkmap;
     this.runMemleaks = objcOptions.runMemleaks;
     this.copts = ImmutableList.copyOf(objcOptions.copts);
     this.compilationMode = Preconditions.checkNotNull(options.compilationMode, "compilationMode");
@@ -92,6 +99,7 @@ public class ObjcConfiguration extends BuildConfiguration.Fragment {
     this.useAbsolutePathsForActions = objcOptions.useAbsolutePathsForActions;
     this.prioritizeStaticLibs = objcOptions.prioritizeStaticLibs;
     this.debugWithGlibcxx = objcOptions.debugWithGlibcxx;
+    this.extraEntitlements = objcOptions.extraEntitlements;
   }
 
   /**
@@ -118,6 +126,10 @@ public class ObjcConfiguration extends BuildConfiguration.Fragment {
     return generateDebugSymbols;
   }
 
+  public boolean generateLinkmap() {
+    return generateLinkmap;
+  }
+
   public boolean runMemleaks() {
     return runMemleaks;
   }
@@ -132,6 +144,9 @@ public class ObjcConfiguration extends BuildConfiguration.Fragment {
   /**
    * Returns the default set of clang options for the current compilation mode.
    */
+  @SkylarkCallable(name = "copts_for_current_compilation_mode", structField = true,
+      doc = "Returns a list of default options to use for compiling Objective-C in the current "
+      + "mode.")
   public ImmutableList<String> getCoptsForCompilationMode() {
     switch (compilationMode) {
       case DBG:
@@ -156,6 +171,10 @@ public class ObjcConfiguration extends BuildConfiguration.Fragment {
    * Returns options passed to (Apple) clang when compiling Objective C. These options should be
    * applied after any default options but before options specified in the attributes of the rule.
    */
+  @SkylarkCallable(name = "copts", structField = true,
+      doc = "Returns a list of options to use for compiling Objective-C."
+      + "These options are applied after any default options but before options specified in the "
+      + "attributes of the rule.")
   public ImmutableList<String> getCopts() {
     return copts;
   }
@@ -243,5 +262,13 @@ public class ObjcConfiguration extends BuildConfiguration.Fragment {
    */
   public boolean shouldPrioritizeStaticLibs() {
     return this.prioritizeStaticLibs;
+  }
+
+  /**
+   * Returns the extra entitlements plist specified as a flag or {@code null} if none was given.
+   */
+  @Nullable
+  public Label getExtraEntitlements() {
+    return extraEntitlements;
   }
 }

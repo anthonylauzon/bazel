@@ -29,20 +29,17 @@ import com.google.common.collect.ListMultimap;
 import com.google.common.collect.Maps;
 import com.google.common.collect.Multimap;
 import com.google.common.collect.MutableClassToInstanceMap;
-import com.google.devtools.build.lib.actions.ArtifactFactory;
-import com.google.devtools.build.lib.actions.PackageRootResolver;
 import com.google.devtools.build.lib.actions.Root;
+import com.google.devtools.build.lib.analysis.AspectDescriptor;
 import com.google.devtools.build.lib.analysis.BlazeDirectories;
 import com.google.devtools.build.lib.analysis.ConfiguredRuleClassProvider;
 import com.google.devtools.build.lib.analysis.Dependency;
 import com.google.devtools.build.lib.analysis.RuleContext;
-import com.google.devtools.build.lib.analysis.ViewCreationFailedException;
 import com.google.devtools.build.lib.analysis.config.BuildConfigurationCollection.Transitions;
 import com.google.devtools.build.lib.cmdline.Label;
 import com.google.devtools.build.lib.cmdline.LabelSyntaxException;
 import com.google.devtools.build.lib.events.Event;
 import com.google.devtools.build.lib.events.EventHandler;
-import com.google.devtools.build.lib.packages.Aspect;
 import com.google.devtools.build.lib.packages.Attribute;
 import com.google.devtools.build.lib.packages.Attribute.Configurator;
 import com.google.devtools.build.lib.packages.Attribute.SplitTransition;
@@ -73,7 +70,6 @@ import com.google.devtools.common.options.OptionsBase;
 import com.google.devtools.common.options.OptionsParsingException;
 import com.google.devtools.common.options.TriState;
 
-import java.io.IOException;
 import java.io.Serializable;
 import java.lang.reflect.Field;
 import java.util.ArrayList;
@@ -148,22 +144,26 @@ public final class BuildConfiguration {
      * The resulting set only contains labels that were derived from command-line options; the
      * intention is that it can be used to sanity-check that the command-line options actually
      * contain these in their transitive closure.
+     *
+     * <p>This functionality only exists for legacy configuration fragments that compute labels from
+     * command-line option values. Don't do that! Instead, use a rule that specifies the mapping
+     * explicitly.
      */
     @SuppressWarnings("unused")
-    public void addImplicitLabels(Multimap<String, Label> implicitLabels) {
+    protected void addImplicitLabels(Multimap<String, Label> implicitLabels) {
     }
 
     /**
-     * The fragment may use this hook to perform I/O and read data into memory that is used during
-     * analysis. During the analysis phase disk I/O operations are disallowed.
-     *
-     * <p>This hook is called for all configurations after the loading phase is complete.
-     *
-     * <p>Do not use this method to change your fragment's state.
+     * Returns a multimap of all labels that should be implicitly loaded from labels that were
+     * specified as options, keyed by the name to be displayed to the user if something goes wrong.
+     * The returned set only contains labels that were derived from command-line options; the
+     * intention is that it can be used to sanity-check that the command-line options actually
+     * contain these in their transitive closure.
      */
-    @SuppressWarnings("unused")
-    public void prepareHook(Path execPath, ArtifactFactory artifactFactory,
-        PackageRootResolver resolver) throws ViewCreationFailedException {
+    public final ListMultimap<String, Label> getImplicitLabels() {
+      ListMultimap<String, Label> implicitLabels = ArrayListMultimap.create();
+      addImplicitLabels(implicitLabels);
+      return implicitLabels;
     }
 
     /**
@@ -225,26 +225,11 @@ public final class BuildConfiguration {
     }
 
     /**
-     * Return false if incremental build is not possible for some reason.
-     */
-    public boolean supportsIncrementalBuild() {
-      return true;
-    }
-
-    /**
      * Return true if the fragment performs static linking. This information is needed for
      * lincence checking.
      */
     public boolean performsStaticLink() {
       return false;
-    }
-
-    /**
-     * Fragments should delete temporary directories they create for their inner mechanisms.
-     * This is only called for target configuration.
-     */
-    @SuppressWarnings("unused")
-    public void prepareForExecutionPhase() throws IOException {
     }
 
     /**
@@ -476,6 +461,8 @@ public final class BuildConfiguration {
                 return "piii";
               case X86_64:
                 return "k8";
+              case PPC:
+                return "ppc";
               case ARM:
                 return "arm";
             }
@@ -1513,7 +1500,7 @@ public final class BuildConfiguration {
      * for each configuration represented by this instance.
      * TODO(bazel-team): this is a really ugly reverse dependency: factor this away.
      */
-    Iterable<Dependency> getDependencies(Label label, ImmutableSet<Aspect> aspects);
+    Iterable<Dependency> getDependencies(Label label, ImmutableSet<AspectDescriptor> aspects);
   }
 
   /**
@@ -1586,7 +1573,8 @@ public final class BuildConfiguration {
     }
 
     @Override
-    public Iterable<Dependency> getDependencies(Label label, ImmutableSet<Aspect> aspects) {
+    public Iterable<Dependency> getDependencies(
+        Label label, ImmutableSet<AspectDescriptor> aspects) {
       return ImmutableList.of(
           currentConfiguration != null
               ? Dependency.withConfigurationAndAspects(label, currentConfiguration, aspects)
@@ -1689,7 +1677,7 @@ public final class BuildConfiguration {
 
     @Override
     public Iterable<Dependency> getDependencies(
-        Label label, ImmutableSet<Aspect> aspects) {
+        Label label, ImmutableSet<AspectDescriptor> aspects) {
       return ImmutableList.of(
           Dependency.withTransitionAndAspects(label, transition, aspects));
     }
@@ -1756,7 +1744,8 @@ public final class BuildConfiguration {
 
 
     @Override
-    public Iterable<Dependency> getDependencies(Label label, ImmutableSet<Aspect> aspects) {
+    public Iterable<Dependency> getDependencies(
+        Label label, ImmutableSet<AspectDescriptor> aspects) {
       ImmutableList.Builder<Dependency> builder = ImmutableList.builder();
       for (TransitionApplier applier : appliers) {
         builder.addAll(applier.getDependencies(label, aspects));
@@ -1846,21 +1835,6 @@ public final class BuildConfiguration {
     }
 
     transitionApplier.applyConfigurationHook(fromRule, attribute, toTarget);
-  }
-
-  /**
-   * Returns a multimap of all labels that should be implicitly loaded from labels that were
-   * specified as options, keyed by the name to be displayed to the user if something goes wrong.
-   * The returned set only contains labels that were derived from command-line options; the
-   * intention is that it can be used to sanity-check that the command-line options actually contain
-   * these in their transitive closure.
-   */
-  public ListMultimap<String, Label> getImplicitLabels() {
-    ListMultimap<String, Label> implicitLabels = ArrayListMultimap.create();
-    for (Fragment fragment : fragments.values()) {
-      fragment.addImplicitLabels(implicitLabels);
-    }
-    return implicitLabels;
   }
 
   /**
@@ -2338,22 +2312,6 @@ public final class BuildConfiguration {
   }
 
   /**
-   * Prepare the fdo support. It reads data into memory that is used during analysis. The analysis
-   * phase is generally not allowed to perform disk I/O. This code is here because it is
-   * conceptually part of the analysis phase, and it needs to happen when the loading phase is
-   * complete.
-   *
-   * <p>C++ also requires this to resolve artifacts that are unconditionally included in every
-   * compilation.</p>
-   */
-  public void prepareToBuild(Path execRoot, ArtifactFactory artifactFactory,
-      PackageRootResolver resolver) throws ViewCreationFailedException {
-    for (Fragment fragment : fragments.values()) {
-      fragment.prepareHook(execRoot, artifactFactory, resolver);
-    }
-  }
-
-  /**
    * Declares dependencies on any relevant Skyframe values (for example, relevant FileValues).
    */
   public void declareSkyframeDependencies(SkyFunction.Environment env) {
@@ -2392,18 +2350,6 @@ public final class BuildConfiguration {
   }
 
   /**
-   * Returns true is incremental builds are supported with this configuration.
-   */
-  public boolean supportsIncrementalBuild() {
-    for (Fragment fragment : fragments.values()) {
-      if (!fragment.supportsIncrementalBuild()) {
-        return false;
-      }
-    }
-    return true;
-  }
-
-  /**
    * Returns true if the configuration performs static linking.
    */
   public boolean performsStaticLink() {
@@ -2413,16 +2359,6 @@ public final class BuildConfiguration {
       }
     }
     return false;
-  }
-
-  /**
-   * Deletes temporary directories before execution phase. This is only called for
-   * target configuration.
-   */
-  public void prepareForExecutionPhase() throws IOException {
-    for (Fragment fragment : fragments.values()) {
-      fragment.prepareForExecutionPhase();
-    }
   }
 
   /**

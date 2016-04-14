@@ -85,19 +85,6 @@ sh_test(
 )
 
 sh_test(
-    name = "bazel_go_example_test",
-    srcs = ["bazel_go_example_test.sh"],
-    data = [
-        ":test-deps",
-        "//tools/build_rules/go:srcs",
-        "//tools/build_rules/go/toolchain",
-        "//tools/build_rules/go/toolchain:go_tool",
-        "//tools/build_rules/go/toolchain:srcs",
-        "//tools/build_rules/go/tools:srcs",
-    ],
-)
-
-sh_test(
     name = "bazel_rules_test",
     size = "large",
     srcs = ["bazel_rules_test.sh"],
@@ -108,6 +95,13 @@ sh_test(
     name = "bazel_test_test",
     srcs = ["bazel_test_test.sh"],
     data = [":test-deps"],
+)
+
+sh_test(
+    name = "bazel_localtest_test",
+    srcs = ["bazel_localtest_test.sh"],
+    data = [":test-deps"],
+    tags = ["local"],
 )
 
 sh_test(
@@ -183,6 +177,14 @@ sh_test(
     srcs = ["local_repository_test.sh"],
     data = [":test-deps"],
     shard_count = 3,
+)
+
+sh_test(
+    name = "local_repository_test_jdk8",
+    size = "small",
+    srcs = ["local_repository_test_jdk8.sh"],
+    data = [":test-deps"],
+    tags = ["jdk8"],
 )
 
 sh_test(
@@ -262,10 +264,18 @@ sh_test(
 )
 
 sh_test(
+    name = "cc_inc_library_test",
+    size = "medium",
+    srcs = ["cc_inc_library_test.sh"],
+    data = [":test-deps"],
+)
+
+sh_test(
     name = "bazel_sandboxing_test",
     size = "large",
     srcs = ["bazel_sandboxing_test.sh"],
     data = [":test-deps"],
+    tags = ["local"],
 )
 
 sh_test(

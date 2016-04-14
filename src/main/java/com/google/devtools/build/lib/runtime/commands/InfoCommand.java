@@ -18,8 +18,8 @@ import com.google.common.base.Predicate;
 import com.google.common.base.Predicates;
 import com.google.common.base.Supplier;
 import com.google.common.collect.Iterables;
-import com.google.devtools.build.lib.Constants;
 import com.google.devtools.build.lib.analysis.BlazeVersionInfo;
+import com.google.devtools.build.lib.analysis.NoBuildEvent;
 import com.google.devtools.build.lib.analysis.config.BuildConfiguration;
 import com.google.devtools.build.lib.analysis.config.InvalidConfigurationException;
 import com.google.devtools.build.lib.events.Event;
@@ -238,6 +238,7 @@ public class InfoCommand implements BlazeCommand {
       }
 
       String key = residue.size() == 1 ? residue.get(0) : null;
+      env.getEventBus().post(new NoBuildEvent());
       if (key != null) { // print just the value for the specified key:
         byte[] value;
         if (items.containsKey(key)) {
@@ -282,11 +283,11 @@ public class InfoCommand implements BlazeCommand {
       Supplier<BuildConfiguration> configurationSupplier, OptionsProvider options) {
     switch (key) {
       // directories
-      case WORKSPACE : return runtime.getWorkspace();
-      case INSTALL_BASE : return runtime.getDirectories().getInstallBase();
-      case OUTPUT_BASE : return runtime.getOutputBase();
-      case EXECUTION_ROOT : return runtime.getExecRoot();
-      case OUTPUT_PATH : return runtime.getDirectories().getOutputPath();
+      case WORKSPACE : return runtime.getWorkspace().getWorkspace();
+      case INSTALL_BASE : return runtime.getWorkspace().getInstallBase();
+      case OUTPUT_BASE : return runtime.getWorkspace().getOutputBase();
+      case EXECUTION_ROOT : return runtime.getWorkspace().getExecRoot();
+      case OUTPUT_PATH : return runtime.getWorkspace().getOutputPath();
       // These are the only (non-hidden) info items that require a configuration, because the
       // corresponding paths contain the short name. Maybe we should recommend using the symlinks
       // or make them hidden by default?
@@ -295,10 +296,11 @@ public class InfoCommand implements BlazeCommand {
       case BLAZE_TESTLOGS : return configurationSupplier.get().getTestLogsDirectory().getPath();
 
       // logs
-      case COMMAND_LOG : return BlazeCommandDispatcher.getCommandLogPath(runtime.getOutputBase());
+      case COMMAND_LOG : return BlazeCommandDispatcher.getCommandLogPath(
+          runtime.getWorkspace().getOutputBase());
       case MESSAGE_LOG :
         // NB: Duplicated in EventLogModule
-        return runtime.getOutputBase().getRelative("message.log");
+        return runtime.getWorkspace().getOutputBase().getRelative("message.log");
 
       // misc
       case RELEASE : return BlazeVersionInfo.instance().getReleaseName();
@@ -341,7 +343,7 @@ public class InfoCommand implements BlazeCommand {
         return getBuildLanguageDefinition(runtime.getRuleClassProvider());
 
       case DEFAULT_PACKAGE_PATH:
-        return Joiner.on(":").join(Constants.DEFAULT_PACKAGE_PATH);
+        return Joiner.on(":").join(options.getOptions(PackageCacheOptions.class).packagePath);
 
       default:
         throw new IllegalArgumentException("missing implementation for " + key);

@@ -11,13 +11,20 @@ filegroup(
 )
 
 filegroup(
+    name = "workspace-file",
+    srcs = [":WORKSPACE"],
+    visibility = ["//tools/cpp/test:__pkg__"],
+)
+
+filegroup(
     name = "srcs",
     srcs = glob(
         ["**"],
         exclude = [
-            "bazel-*/**",
-            "output/**",
-            ".*/**",
+            "bazel-*/**",  # convenience symlinks
+            "out/**",  # IntelliJ with setup-intellij.sh
+            "output/**",  # output of compile.sh
+            ".*/**",  # mainly git
         ],
     ) + [
         "//examples:srcs",
@@ -39,7 +46,3 @@ pkg_tar(
     # Public but bazel-only visibility.
     visibility = ["//:__subpackages__"],
 )
-
-load("//tools/build_rules/go:def.bzl", "go_prefix")
-
-go_prefix("github.com/bazelbuild/bazel")

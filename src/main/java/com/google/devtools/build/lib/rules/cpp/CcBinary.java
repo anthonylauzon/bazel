@@ -38,11 +38,13 @@ import com.google.devtools.build.lib.collect.nestedset.NestedSetBuilder;
 import com.google.devtools.build.lib.collect.nestedset.Order;
 import com.google.devtools.build.lib.packages.TargetUtils;
 import com.google.devtools.build.lib.rules.RuleConfiguredTargetFactory;
+import com.google.devtools.build.lib.rules.apple.Platform;
 import com.google.devtools.build.lib.rules.cpp.CcToolchainFeatures.FeatureConfiguration;
 import com.google.devtools.build.lib.rules.cpp.CppConfiguration.DynamicMode;
 import com.google.devtools.build.lib.rules.cpp.Link.LinkStaticness;
 import com.google.devtools.build.lib.rules.cpp.Link.LinkTargetType;
 import com.google.devtools.build.lib.rules.cpp.LinkerInputs.LibraryToLink;
+import com.google.devtools.build.lib.rules.test.ExecutionInfoProvider;
 import com.google.devtools.build.lib.rules.test.InstrumentedFilesProvider;
 import com.google.devtools.build.lib.syntax.Type;
 import com.google.devtools.build.lib.util.FileTypeSet;
@@ -138,7 +140,9 @@ public abstract class CcBinary implements RuleConfiguredTargetFactory {
       builder.addSymlinksToArtifacts(cppCompilationContext.getDeclaredIncludeSrcs());
       // Add additional files that are referenced from the compile command, like module maps
       // or header modules.
-      builder.addSymlinksToArtifacts(cppCompilationContext.getAdditionalInputs());
+      builder.addSymlinksToArtifacts(
+          cppCompilationContext.getAdditionalInputs(
+              CppHelper.usePic(context, !isLinkShared(context))));
     }
     return builder.build();
   }
@@ -332,7 +336,15 @@ public abstract class CcBinary implements RuleConfiguredTargetFactory {
         sourceFileMap.put(source.getExecPath(), source);
       }
     }
-
+   
+    // Support test execution on darwin.
+    if (Platform.isApplePlatform(cppConfiguration.getTargetCpu())
+        && TargetUtils.isTestRule(ruleContext.getRule())) {
+      ruleBuilder.add(
+          ExecutionInfoProvider.class,
+          new ExecutionInfoProvider(ImmutableMap.of("requires-darwin", "")));
+    }
+    
     return ruleBuilder
         .add(RunfilesProvider.class, RunfilesProvider.simple(runfiles))
         .add(

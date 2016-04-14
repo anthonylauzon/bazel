@@ -34,6 +34,8 @@ import com.google.devtools.build.lib.analysis.actions.TemplateExpansionAction.Su
 import com.google.devtools.build.lib.collect.nestedset.NestedSet;
 import com.google.devtools.build.lib.collect.nestedset.NestedSetBuilder;
 import com.google.devtools.build.lib.rules.apple.AppleConfiguration;
+import com.google.devtools.build.lib.rules.apple.DottedVersion;
+import com.google.devtools.build.lib.rules.test.InstrumentedFilesProvider;
 import com.google.devtools.build.lib.rules.test.TestEnvironmentProvider;
 import com.google.devtools.build.lib.syntax.Type;
 import com.google.devtools.build.lib.util.FileType;
@@ -219,7 +221,9 @@ public class TestSupport {
   /**
    * Adds all files needed to run this test to the passed Runfiles builder.
    */
-  public TestSupport addRunfiles(Builder runfilesBuilder) throws InterruptedException {
+  public TestSupport addRunfiles(
+      Builder runfilesBuilder, InstrumentedFilesProvider instrumentedFilesProvider)
+      throws InterruptedException {
     runfilesBuilder
         .addArtifact(testBundleIpa())
         .addArtifacts(testHarnessIpa().asSet())
@@ -235,6 +239,11 @@ public class TestSupport {
       runfilesBuilder.addTransitiveArtifacts(labDeviceRunfiles());
     }
 
+    if (ruleContext.getConfiguration().isCodeCoverageEnabled()) {
+      runfilesBuilder.addArtifact(ruleContext.getHostPrerequisiteArtifact(IosTest.MCOV_TOOL_ATTR));
+      runfilesBuilder.addTransitiveArtifacts(instrumentedFilesProvider.getInstrumentedFiles());
+    }
+
     return this;
   }
 
@@ -243,16 +252,21 @@ public class TestSupport {
    * builder.
    */
   public Map<Class<? extends TransitiveInfoProvider>, TransitiveInfoProvider> getExtraProviders() {
+    IosDeviceProvider deviceProvider =
+        ruleContext.getPrerequisite(IosTest.TARGET_DEVICE, Mode.TARGET, IosDeviceProvider.class);
+    DottedVersion xcodeVersion = deviceProvider.getXcodeVersion();
     AppleConfiguration configuration = ruleContext.getFragment(AppleConfiguration.class);
 
     ImmutableMap.Builder<String, String> envBuilder = ImmutableMap.builder();
 
-    envBuilder.putAll(configuration.getEnvironmentForIosAction());
-    envBuilder.putAll(configuration.getAppleHostSystemEnv());
+    if (xcodeVersion != null) {
+      envBuilder.putAll(configuration.getXcodeVersionEnv(xcodeVersion));
+    }
 
     if (ruleContext.getConfiguration().isCodeCoverageEnabled()) {
       envBuilder.put("COVERAGE_GCOV_PATH",
           ruleContext.getHostPrerequisiteArtifact(IosTest.GCOV_ATTR).getExecPathString());
+      envBuilder.put("APPLE_COVERAGE", "1");
     }
 
     return ImmutableMap.<Class<? extends TransitiveInfoProvider>, TransitiveInfoProvider>of(

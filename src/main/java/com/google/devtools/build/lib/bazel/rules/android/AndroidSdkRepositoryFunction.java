@@ -13,6 +13,7 @@
 // limitations under the License.
 package com.google.devtools.build.lib.bazel.rules.android;
 
+import com.google.devtools.build.lib.analysis.BlazeDirectories;
 import com.google.devtools.build.lib.analysis.RuleDefinition;
 import com.google.devtools.build.lib.packages.AttributeMap;
 import com.google.devtools.build.lib.packages.NonconfigurableAttributeMapper;
@@ -39,13 +40,14 @@ public class AndroidSdkRepositoryFunction extends RepositoryFunction {
   }
 
   @Override
-  public SkyValue fetch(Rule rule, Path outputDirectory, Environment env)
-      throws SkyFunctionException {
+  public SkyValue fetch(
+      Rule rule, Path outputDirectory, BlazeDirectories directories, Environment env)
+          throws SkyFunctionException {
     prepareLocalRepositorySymlinkTree(rule, outputDirectory);
-    PathFragment pathFragment = getTargetPath(rule, getWorkspace());
+    PathFragment pathFragment = getTargetPath(rule, directories.getWorkspace());
 
     if (!symlinkLocalRepositoryContents(
-        outputDirectory, getOutputBase().getFileSystem().getPath(pathFragment))) {
+        outputDirectory, directories.getOutputBase().getFileSystem().getPath(pathFragment))) {
       return null;
     }
 
@@ -55,21 +57,10 @@ public class AndroidSdkRepositoryFunction extends RepositoryFunction {
 
     String template = getStringResource("android_sdk_repository_template.txt");
 
-    // Android 23 removed most of org.apache.http from android.jar and moved it
-    // to a separate jar, but this jar exists only with version 23 and above.
-    // Not sure when this jar will be removed.
-    String orgApacheHttpLegacyImport = "";
-    if (apiLevel >= 23) {
-      orgApacheHttpLegacyImport =
-          getStringResource("android_sdk_org_apache_http_legacy_import_template.txt")
-              .replaceAll("%api_level%", apiLevel.toString());
-    }
-
     String buildFile = template
         .replaceAll("%repository_name%", rule.getName())
         .replaceAll("%build_tools_version%", buildToolsVersion)
-        .replaceAll("%api_level%", apiLevel.toString())
-        .replaceAll("%org_apache_http_legacy_import%", orgApacheHttpLegacyImport);
+        .replaceAll("%api_level%", apiLevel.toString());
 
     writeBuildFile(outputDirectory, buildFile);
     return RepositoryDirectoryValue.create(outputDirectory);

@@ -632,6 +632,13 @@ public class SpawnAction extends AbstractAction {
       return this;
     }
 
+    /**
+     * Checks whether the action produces any outputs
+     */
+    public boolean hasOutputs() {
+      return !outputs.isEmpty();
+    }
+
     public Builder setResources(ResourceSet resourceSet) {
       this.resourceSet = resourceSet;
       return this;
@@ -923,7 +930,7 @@ public class SpawnAction extends AbstractAction {
 
     public Builder setMnemonic(String mnemonic) {
       Preconditions.checkArgument(
-          !mnemonic.isEmpty() && CharMatcher.JAVA_LETTER_OR_DIGIT.matchesAllOf(mnemonic),
+          !mnemonic.isEmpty() && CharMatcher.javaLetterOrDigit().matchesAllOf(mnemonic),
           "mnemonic must only contain letters and/or digits, and have non-zero length, was: \"%s\"",
           mnemonic);
       this.mnemonic = mnemonic;

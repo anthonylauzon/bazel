@@ -42,13 +42,12 @@ import com.google.devtools.build.lib.analysis.config.BuildConfiguration;
 import com.google.devtools.build.lib.analysis.config.RunUnder;
 import com.google.devtools.build.lib.cmdline.Label;
 import com.google.devtools.build.lib.cmdline.LabelSyntaxException;
+import com.google.devtools.build.lib.cmdline.LabelValidator;
 import com.google.devtools.build.lib.collect.nestedset.NestedSet;
 import com.google.devtools.build.lib.collect.nestedset.NestedSetBuilder;
 import com.google.devtools.build.lib.collect.nestedset.Order;
-import com.google.devtools.build.lib.concurrent.ThreadSafety.Immutable;
 import com.google.devtools.build.lib.events.Location;
 import com.google.devtools.build.lib.packages.AspectDefinition;
-import com.google.devtools.build.lib.packages.AspectParameters;
 import com.google.devtools.build.lib.packages.Attribute;
 import com.google.devtools.build.lib.packages.Attribute.ConfigurationTransition;
 import com.google.devtools.build.lib.packages.Attribute.LateBoundLabel;
@@ -165,12 +164,12 @@ public class SkylarkRuleClassFunctions {
   // rules to skylark extensions. Using the same instance would require a large refactoring.
   // If we don't want to support old built-in rules and Skylark simultaneously
   // (except for transition phase) it's probably OK.
-  private static LoadingCache<String, Label> labelCache =
+  private static final LoadingCache<String, Label> labelCache =
       CacheBuilder.newBuilder().build(new CacheLoader<String, Label>() {
     @Override
     public Label load(String from) throws Exception {
       try {
-        return Label.parseAbsolute(from);
+        return Label.parseAbsolute(from, false);
       } catch (LabelSyntaxException e) {
         throw new Exception(from);
       }
@@ -555,7 +554,7 @@ public class SkylarkRuleClassFunctions {
             throw new EvalException(definitionLocation,
                 "All aspects applied to rule dependencies must be top-level values");
           }
-          attributeBuilder.aspect(skylarkAspect.getAspectClass());
+          attributeBuilder.aspect(skylarkAspect.getAspectClass(), skylarkAspect.getDefinition());
         }
 
         addAttribute(definitionLocation, builder,
@@ -615,16 +614,36 @@ public class SkylarkRuleClassFunctions {
       + "Example: <br><pre class=language-python>Label(\"//tools:default\")</pre>",
       returnType = Label.class,
       mandatoryPositionals = {@Param(name = "label_string", type = String.class,
-            doc = "the label string")},
-      useLocation = true)
+          doc = "the label string")},
+      optionalNamedOnly = {@Param(
+          name = "relative_to_caller_repository",
+          type = Boolean.class,
+          defaultValue = "False",
+          doc = "whether the label should be resolved relative to the label of the file this "
+              + "function is called from.")},
+      useLocation = true,
+      useEnvironment = true)
   private static final BuiltinFunction label = new BuiltinFunction("Label") {
-      public Label invoke(String labelString,
-          Location loc) throws EvalException, ConversionException {
-          try {
-            return labelCache.get(labelString);
-          } catch (ExecutionException e) {
-            throw new EvalException(loc, "Illegal absolute label syntax: " + labelString);
+      @SuppressWarnings({"unchecked", "unused"})
+      public Label invoke(
+          String labelString, Boolean relativeToCallerRepository, Location loc, Environment env)
+          throws EvalException {
+        Label parentLabel = null;
+        if (relativeToCallerRepository) {
+          parentLabel = env.getCallerLabel();
+        } else {
+          parentLabel = env.getGlobals().label();
+        }
+        try {
+          if (parentLabel != null) {
+            LabelValidator.parseAbsoluteLabel(labelString);
+            labelString = parentLabel.getRelative(labelString)
+                .getUnambiguousCanonicalForm();
           }
+          return labelCache.get(labelString);
+        } catch (LabelValidator.BadLabelException | LabelSyntaxException | ExecutionException e) {
+          throw new EvalException(loc, "Illegal absolute label syntax: " + labelString);
+        }
       }
     };
 
@@ -840,7 +859,7 @@ public class SkylarkRuleClassFunctions {
     private final ImmutableSet<String> fragments;
     private final ImmutableSet<String> hostFragments;
     private final Environment funcallEnv;
-    private Exported exported;
+    private SkylarkAspectClass aspectClass;
 
     public SkylarkAspect(
         BaseFunction implementation,
@@ -873,20 +892,6 @@ public class SkylarkRuleClassFunctions {
       return attributes;
     }
 
-    /**
-     * Gets the set of configuration fragment names needed in the target configuration.
-     */
-    public ImmutableSet<String> getFragments() {
-      return fragments;
-    }
-
-    /**
-     * Gets the set of configuration fragment names needed in the host configuration.
-     */
-    public ImmutableSet<String> getHostFragments() {
-      return hostFragments;
-    }
-
     @Override
     public boolean isImmutable() {
       return implementation.isImmutable();
@@ -904,86 +909,29 @@ public class SkylarkRuleClassFunctions {
 
     public SkylarkAspectClass getAspectClass() {
       Preconditions.checkState(isExported());
-      return new SkylarkAspectClassImpl(this);
+      return aspectClass;
     }
 
     void export(Label extensionLabel, String name) {
-      this.exported = new Exported(extensionLabel, name);
+      Preconditions.checkArgument(!isExported());
+      this.aspectClass = new SkylarkAspectClass(extensionLabel, name);
     }
 
     public boolean isExported() {
-      return exported != null;
+      return aspectClass != null;
     }
 
-    private Label getExtensionLabel() {
-      Preconditions.checkArgument(isExported());
-      return exported.extensionLabel;
-    }
-
-    private String getExportedName() {
-      Preconditions.checkArgument(isExported());
-      return exported.name;
-    }
-
-    @Immutable
-    private static class Exported {
-      private final Label extensionLabel;
-      private final String name;
-
-      public Exported(Label extensionLabel, String name) {
-        this.extensionLabel = extensionLabel;
-        this.name = name;
-      }
-
-      @Override
-      public String toString() {
-        return extensionLabel.toString() + "%" + name;
-      }
-    }
-  }
-
-  /**
-   * Implementation of an aspect class defined in Skylark.
-   */
-  @Immutable
-  private static final class SkylarkAspectClassImpl extends SkylarkAspectClass {
-    private final AspectDefinition aspectDefinition;
-    private final Label extensionLabel;
-    private final String exportedName;
-
-    public SkylarkAspectClassImpl(SkylarkAspect skylarkAspect) {
-      Preconditions.checkArgument(skylarkAspect.isExported(), "Skylark aspects must be exported");
-      this.extensionLabel = skylarkAspect.getExtensionLabel();
-      this.exportedName = skylarkAspect.getExportedName();
-
+    public AspectDefinition getDefinition() {
       AspectDefinition.Builder builder = new AspectDefinition.Builder(getName());
-      for (String attributeAspect : skylarkAspect.getAttributeAspects()) {
-        builder.attributeAspect(attributeAspect, this);
+      for (String attributeAspect : attributeAspects) {
+        builder.attributeAspect(attributeAspect, aspectClass);
       }
-      ImmutableList<Pair<String, Descriptor>> attributes = skylarkAspect.getAttributes();
       for (Pair<String, Descriptor> attribute : attributes) {
         builder.add(attribute.second.getAttributeBuilder().build(attribute.first));
       }
-      builder.requiresConfigurationFragmentsBySkylarkModuleName(skylarkAspect.getFragments());
-      builder.requiresHostConfigurationFragmentsBySkylarkModuleName(
-          skylarkAspect.getHostFragments());
-      this.aspectDefinition = builder.build();
+      builder.requiresConfigurationFragmentsBySkylarkModuleName(fragments);
+      builder.requiresHostConfigurationFragmentsBySkylarkModuleName(hostFragments);
+      return builder.build();
     }
-
-    @Override
-    public AspectDefinition getDefinition(AspectParameters aspectParameters) {
-      return aspectDefinition;
-    }
-
-    @Override
-    public Label getExtensionLabel() {
-      return extensionLabel;
-    }
-
-    @Override
-    public String getExportedName() {
-      return exportedName;
-    }
-
   }
 }

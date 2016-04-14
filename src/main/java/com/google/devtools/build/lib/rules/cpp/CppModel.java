@@ -287,7 +287,7 @@ public final class CppModel {
     }
 
     builder.setExtraSystemIncludePrefixes(additionalIncludes);
-    builder.setFdoBuildStamp(CppHelper.getFdoBuildStamp(cppConfiguration));
+    builder.setFdoBuildStamp(CppHelper.getFdoBuildStamp(ruleContext));
     builder.setFeatureConfiguration(featureConfiguration);
     return builder;
   }
@@ -310,10 +310,10 @@ public final class CppModel {
   private Collection<String> getHeaderModulePaths(CppCompileActionBuilder builder,
       boolean usePic) {
     Collection<String> result = new LinkedHashSet<>();
-    NestedSet<Artifact> artifacts = featureConfiguration.isEnabled(
-        CppRuleClasses.HEADER_MODULE_INCLUDES_DEPENDENCIES)
-        ? builder.getContext().getTopLevelHeaderModules()
-        : builder.getContext().getAdditionalInputs();
+    NestedSet<Artifact> artifacts =
+        featureConfiguration.isEnabled(CppRuleClasses.HEADER_MODULE_INCLUDES_DEPENDENCIES)
+            ? builder.getContext().getTopLevelHeaderModules(usePic)
+            : builder.getContext().getAdditionalInputs(usePic);
     for (Artifact artifact : artifacts) {
       String filename = artifact.getFilename();
       if (!filename.endsWith(".pcm")) {
@@ -347,8 +347,8 @@ public final class CppModel {
       buildVariables.addVariable("module_name", cppModuleMap.getName());
       buildVariables.addVariable("module_map_file",
           cppModuleMap.getArtifact().getExecPathString());
-      CcToolchainFeatures.Variables.NestedSequence.Builder sequence =
-          new CcToolchainFeatures.Variables.NestedSequence.Builder();
+      CcToolchainFeatures.Variables.ValueSequence.Builder sequence =
+          new CcToolchainFeatures.Variables.ValueSequence.Builder();
       for (Artifact artifact : context.getDirectModuleMaps()) {
         sequence.addValue(artifact.getExecPathString());
       }
@@ -367,13 +367,15 @@ public final class CppModel {
     }
 
     if (ccRelativeName != null) {
-      cppConfiguration.getFdoSupport().configureCompilation(builder, buildVariables, ruleContext,
-          ccRelativeName, autoFdoImportPath, usePic, featureConfiguration);
+      CppHelper.getFdoSupport(ruleContext).configureCompilation(builder, buildVariables,
+          ruleContext, ccRelativeName, autoFdoImportPath, usePic, featureConfiguration);
     }
     if (gcnoFile != null) {
       buildVariables.addVariable("gcov_gcno_file", gcnoFile.getExecPathString());
     }
 
+    buildVariables.addAllVariables(CppHelper.getToolchain(ruleContext).getBuildVariables());
+    
     CcToolchainFeatures.Variables variables = buildVariables.build();
     builder.setVariables(variables);
   }
@@ -567,7 +569,7 @@ public final class CppModel {
         .setOutputFile(outputFile)
         .setDotdFile(outputName, dependencyFileExtension)
         .setTempOutputFile(tempOutputName);
-    setupBuildVariables(builder, getGeneratePicActions(), ccRelativeName, execPath, null);
+    setupBuildVariables(builder, usePic, ccRelativeName, execPath, null);
     semantics.finalizeCompileActionBuilder(ruleContext, builder);
     CppCompileAction action = builder.build();
     env.registerAction(action);

@@ -99,6 +99,7 @@ java_test(
         "//src/main/java/com/google/devtools/build/lib:util",
         "//src/main/java/com/google/devtools/build/lib:vfs",
         "//src/main/java/com/google/devtools/build/lib/actions",
+        "//src/main/java/com/google/devtools/build/lib/rules/cpp",
         "//src/main/java/com/google/devtools/build/skyframe",
         "//third_party:guava",
         "//third_party:guava-testlib",
@@ -318,6 +319,7 @@ java_library(
         "//src/main/java/com/google/devtools/build/lib:collect",
         "//src/main/java/com/google/devtools/build/lib:concurrent",
         "//src/main/java/com/google/devtools/build/lib:events",
+        "//src/main/java/com/google/devtools/build/lib:flags",
         "//src/main/java/com/google/devtools/build/lib:io",
         "//src/main/java/com/google/devtools/build/lib:java-rules",
         "//src/main/java/com/google/devtools/build/lib:packages",
@@ -464,6 +466,7 @@ java_test(
     srcs = glob([
         "analysis/*.java",
     ]),
+    shard_count = 2,
     tags = ["analysis"],
     test_class = "com.google.devtools.build.lib.AllTests",
     deps = [
@@ -530,6 +533,7 @@ java_library(
         "//src/main/java/com/google/devtools/build/lib:build-base",
         "//src/main/java/com/google/devtools/build/lib:clock",
         "//src/main/java/com/google/devtools/build/lib:events",
+        "//src/main/java/com/google/devtools/build/lib:flags",
         "//src/main/java/com/google/devtools/build/lib:io",
         "//src/main/java/com/google/devtools/build/lib:packages",
         "//src/main/java/com/google/devtools/build/lib:runtime",
@@ -546,8 +550,8 @@ java_library(
         "//third_party:jsr305",
         "//third_party:junit4",
         "//third_party:mockito",
-        "//third_party:protobuf",
         "//third_party:truth",
+        "//third_party/protobuf",
     ],
 )
 
@@ -583,8 +587,8 @@ java_test(
         "//third_party:guava-testlib",
         "//third_party:jsr305",
         "//third_party:junit4",
-        "//third_party:protobuf",
         "//third_party:truth",
+        "//third_party/protobuf",
     ],
 )
 
@@ -602,6 +606,7 @@ java_test(
         ":test_runner",
         "//src/main/java/com/google/devtools/build/lib:bazel-rules",
         "//src/main/java/com/google/devtools/build/lib:build-base",
+        "//src/main/java/com/google/devtools/build/lib:flags",
         "//src/main/java/com/google/devtools/build/lib:io",
         "//src/main/java/com/google/devtools/build/lib:packages",
         "//src/main/java/com/google/devtools/build/skyframe",
@@ -642,8 +647,8 @@ java_test(
         "//third_party:jsr305",
         "//third_party:junit4",
         "//third_party:mockito",
-        "//third_party:protobuf",
         "//third_party:truth",
+        "//third_party/protobuf",
     ],
 )
 
@@ -940,6 +945,7 @@ java_test(
         "//src/main/java/com/google/devtools/build/lib:build-base",
         "//src/main/java/com/google/devtools/build/lib:cmdline",
         "//src/main/java/com/google/devtools/build/lib:common",
+        "//src/main/java/com/google/devtools/build/lib:flags",
         "//src/main/java/com/google/devtools/build/lib:packages-internal",
         "//src/main/java/com/google/devtools/build/lib:util",
         "//src/main/java/com/google/devtools/build/lib:vfs",
@@ -953,8 +959,8 @@ java_test(
         "//third_party:guava-testlib",
         "//third_party:jsr305",
         "//third_party:junit4",
-        "//third_party:protobuf",
         "//third_party:truth",
+        "//third_party/protobuf",
     ],
 )
 
@@ -996,8 +1002,8 @@ java_test(
         "//third_party:jsr305",
         "//third_party:junit4",
         "//third_party:mockito",
-        "//third_party:protobuf",
         "//third_party:truth",
+        "//third_party/protobuf",
     ],
 )
 
@@ -1049,6 +1055,8 @@ java_test(
         "//src/main/java/com/google/devtools/build/lib:packages-internal",
         "//src/main/java/com/google/devtools/build/lib:syntax",
         "//src/main/java/com/google/devtools/build/lib:vfs",
+        "//src/main/java/com/google/devtools/build/lib/bazel/repository/downloader",
+        "//src/main/java/com/google/devtools/build/lib/rules/cpp",
         "//src/main/java/com/google/devtools/build/skyframe",
         "//third_party:guava",
         "//third_party:guava-testlib",
@@ -1070,11 +1078,13 @@ java_test(
         "//src/main/java/com/google/devtools/build/lib:bazel-rules",
         "//src/main/java/com/google/devtools/build/lib:build-base",
         "//src/main/java/com/google/devtools/build/lib:clock",
+        "//src/main/java/com/google/devtools/build/lib:flags",
         "//src/main/java/com/google/devtools/build/lib:io",
         "//src/main/java/com/google/devtools/build/lib:packages",
         "//src/main/java/com/google/devtools/build/lib:runtime",
         "//src/main/java/com/google/devtools/build/lib:util",
         "//src/main/java/com/google/devtools/build/lib:vfs",
+        "//src/main/java/com/google/devtools/build/lib/actions",
         "//src/main/java/com/google/devtools/common/options",
         "//src/main/protobuf:invocation_policy_java_proto",
         "//src/main/protobuf:test_status_java_proto",
@@ -1159,8 +1169,8 @@ java_test(
         "//src/main/java/com/google/devtools/build/lib/actions",
         "//third_party:guava",
         "//third_party:junit4",
-        "//third_party:protobuf",
         "//third_party:truth",
+        "//third_party/protobuf",
     ],
 )
 

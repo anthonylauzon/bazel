@@ -49,12 +49,15 @@ public interface RuleClassProvider {
    * Returns a new Skylark Environment instance for rule creation.
    * Implementations need to be thread safe.
    * Be sure to close() the mutability before you return the results of said evaluation.
+   *
+   * @param label the location of the rule.
    * @param mutability the Mutability for the current evaluation context
    * @param eventHandler the EventHandler for warnings, errors, etc.
    * @param astFileContentHashCode the hash code identifying this environment.
    * @return an Environment, in which to evaluate load time skylark forms.
    */
   Environment createSkylarkRuleClassEnvironment(
+      Label label,
       Mutability mutability,
       EventHandler eventHandler,
       @Nullable String astFileContentHashCode,
@@ -66,13 +69,21 @@ public interface RuleClassProvider {
   Map<String, Class<? extends NativeAspectFactory>> getAspectFactoryMap();
 
   /**
-   * Returns the default content of the WORKSPACE file.
+   * Returns the default content that should be added at the beginning of the WORKSPACE file.
    *
    * <p>Used to provide external dependencies for built-in rules. Rules defined here can be
    * overwritten in the WORKSPACE file in the actual workspace.
    */
-  String getDefaultWorkspaceFile();
-  
+  String getDefaultWorkspacePrefix();
+
+
+  /**
+   * Returns the default content that should be added at the end of the WORKSPACE file.
+   *
+   * <p>Used to load skylark repository in the bazel_tools repository.
+   */
+  String getDefaultWorkspaceSuffix();
+
   /**
    * Returns the path to the tools repository
    */

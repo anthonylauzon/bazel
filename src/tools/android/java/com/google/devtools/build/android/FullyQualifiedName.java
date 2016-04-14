@@ -1,4 +1,4 @@
-// Copyright 2015 The Bazel Authors. All rights reserved.
+// Copyright 2016 The Bazel Authors. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -16,26 +16,59 @@ package com.google.devtools.build.android;
 import com.google.common.base.Joiner;
 import com.google.common.base.MoreObjects;
 import com.google.common.base.Preconditions;
+import com.google.common.collect.ImmutableList;
+import com.google.common.collect.Ordering;
 
 import com.android.resources.ResourceType;
 
+import java.nio.file.Paths;
 import java.util.List;
 import java.util.Objects;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+
+import javax.annotation.CheckReturnValue;
+import javax.annotation.concurrent.Immutable;
 
 /**
  * Represents a fully qualified name for an android resource.
  *
  * Each resource name consists of the resource package, name, type, and qualifiers.
  */
-public class FullyQualifiedName {
+@Immutable
+public class FullyQualifiedName implements DataKey, Comparable<FullyQualifiedName> {
   public static final String DEFAULT_PACKAGE = "res-auto";
 
   private final String pkg;
-  private final List<String> qualifiers;
+  private final ImmutableList<String> qualifiers;
   private final ResourceType resourceType;
   private final String resourceName;
+
+  /**
+   * Returns a string path representation of the FullyQualifiedName.
+   *
+   * Non-values Android Resource have a well defined file layout: From the resource directory,
+   * they reside in &lt;resource type&gt;[-&lt;qualifier&gt;]/&lt;resource name&gt;[.extension]
+   *
+   * @param sourceExtension The extension of the resource represented by the FullyQualifiedName
+   * @return A string representation of the FullyQualifiedName with the provided extension.
+   */
+  public String toPathString(String sourceExtension) {
+    // TODO(corysmith): Does the extension belong in the FullyQualifiedName?
+    return Paths.get(
+            Joiner.on("-")
+                .join(
+                    ImmutableList.<String>builder()
+                        .add(resourceType.getName())
+                        .addAll(qualifiers)
+                        .build()),
+            resourceName + sourceExtension)
+        .toString();
+  }
+
+  public String name() {
+    return resourceName;
+  }
 
   /**
    * A factory for parsing an generating FullyQualified names with qualifiers and package.
@@ -51,7 +84,7 @@ public class FullyQualifiedName {
     private final List<String> qualifiers;
     private final String pkg;
 
-    public Factory(List<String> qualifiers, String pkg) {
+    private Factory(List<String> qualifiers, String pkg) {
       this.qualifiers = qualifiers;
       this.pkg = pkg;
     }
@@ -98,16 +131,8 @@ public class FullyQualifiedName {
     }
   }
 
-  private FullyQualifiedName(
-      String pkg, List<String> qualifiers, ResourceType resourceType, String resourceName) {
-    this.pkg = pkg;
-    this.qualifiers = qualifiers;
-    this.resourceType = resourceType;
-    this.resourceName = resourceName;
-  }
-
   /**
-   * Creates a new FullyQualifiedName.
+   * Creates a new FullyQualifiedName with sorted qualifiers.
    * @param pkg The resource package of the name. If unknown the default should be "res-auto"
    * @param qualifiers The resource qualifiers of the name, such as "en" or "xhdpi".
    * @param resourceType The resource type of the name.
@@ -116,7 +141,30 @@ public class FullyQualifiedName {
    */
   public static FullyQualifiedName of(
       String pkg, List<String> qualifiers, ResourceType resourceType, String resourceName) {
-    return new FullyQualifiedName(pkg, qualifiers, resourceType, resourceName);
+    return new FullyQualifiedName(
+        pkg, Ordering.natural().immutableSortedCopy(qualifiers), resourceType, resourceName);
+  }
+
+  private FullyQualifiedName(
+      String pkg,
+      ImmutableList<String> qualifiers,
+      ResourceType resourceType,
+      String resourceName) {
+    this.pkg = pkg;
+    this.qualifiers = qualifiers;
+    this.resourceType = resourceType;
+    this.resourceName = resourceName;
+  }
+
+  /** Creates a FullyQualifiedName from this one with a different package. */
+  @CheckReturnValue
+  public FullyQualifiedName replacePackage(String newPackage) {
+    if (pkg.equals(newPackage)) {
+      return this;
+    }
+    // Don't use "of" because it ensures the qualifiers are sorted -- we already know
+    // they are sorted here.
+    return new FullyQualifiedName(newPackage, qualifiers, resourceType, resourceName);
   }
 
   @Override
@@ -144,5 +192,27 @@ public class FullyQualifiedName {
         .add("resourceType", resourceType)
         .add("resourceName", resourceName)
         .toString();
+  }
+
+  @Override
+  public int compareTo(FullyQualifiedName other) {
+    if (!pkg.equals(other.pkg)) {
+      return pkg.compareTo(other.pkg);
+    }
+    if (!resourceType.equals(other.resourceType)) {
+      return resourceType.compareTo(other.resourceType);
+    }
+    if (!resourceName.equals(other.resourceName)) {
+      return resourceName.compareTo(other.resourceName);
+    }
+    // TODO(corysmith): Figure out a more performant stable way to keep a stable order.
+    if (!qualifiers.equals(other.qualifiers)) {
+      if (qualifiers.size() != other.qualifiers.size()) {
+        return qualifiers.size() - other.qualifiers.size();
+      }
+      // This works because the qualifiers are sorted on creation.
+      return qualifiers.toString().compareTo(other.qualifiers.toString());
+    }
+    return 0;
   }
 }

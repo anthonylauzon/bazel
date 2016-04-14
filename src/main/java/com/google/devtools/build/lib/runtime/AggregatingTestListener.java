@@ -18,7 +18,6 @@ import com.google.common.annotations.VisibleForTesting;
 import com.google.common.collect.HashMultimap;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
-import com.google.common.collect.MapMaker;
 import com.google.common.collect.Maps;
 import com.google.common.collect.Multimap;
 import com.google.common.collect.Sets;
@@ -45,6 +44,7 @@ import com.google.devtools.build.lib.view.test.TestStatus.BlazeTestStatus;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 
 /**
@@ -53,13 +53,12 @@ import java.util.concurrent.ConcurrentMap;
  */
 @ThreadSafety.ThreadSafe
 public class AggregatingTestListener {
-  private final ConcurrentMap<Artifact, TestResult> statusMap = new MapMaker().makeMap();
+  private final ConcurrentMap<Artifact, TestResult> statusMap = new ConcurrentHashMap<>();
 
   private final TestResultAnalyzer analyzer;
   private final EventBus eventBus;
   private final EventHandlerPreconditions preconditionHelper;
   private volatile boolean blazeHalted = false;
-  private volatile boolean skippedTestsBecauseOfEarlierFailure;
 
   // summaryLock guards concurrent access to these two collections, which should be kept
   // synchronized with each other.
@@ -165,7 +164,7 @@ public class AggregatingTestListener {
       }
       finalSummary =
           analyzer
-              .markUnbuilt(summary, blazeHalted, skippedTestsBecauseOfEarlierFailure)
+              .markUnbuilt(summary, blazeHalted)
               .build();
 
       // These are never going to run; removing them marks the target complete.
@@ -192,8 +191,6 @@ public class AggregatingTestListener {
     BuildResult result = event.getResult();
     if (result.wasCatastrophe()) {
       blazeHalted = true;
-    } else if (result.skippedTargetsBecauseOfEarlierFailure()) {
-      skippedTestsBecauseOfEarlierFailure = true;
     }
     buildComplete(result.getActualTargets(), result.getSuccessfulTargets());
   }

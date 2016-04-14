@@ -21,12 +21,12 @@ import com.google.devtools.build.lib.cmdline.Label;
 import com.google.devtools.build.lib.cmdline.LabelSyntaxException;
 import com.google.devtools.build.lib.cmdline.RepositoryName;
 import com.google.devtools.build.lib.concurrent.ThreadSafety.ThreadSafe;
+import com.google.devtools.build.lib.events.Event;
 import com.google.devtools.build.lib.packages.AggregatingAttributeMapper;
 import com.google.devtools.build.lib.packages.BuildFileContainsErrorsException;
 import com.google.devtools.build.lib.packages.NoSuchPackageException;
 import com.google.devtools.build.lib.packages.Package;
 import com.google.devtools.build.lib.packages.Rule;
-import com.google.devtools.build.lib.packages.RuleSerializer;
 import com.google.devtools.build.lib.skyframe.FileSymlinkException;
 import com.google.devtools.build.lib.skyframe.FileValue;
 import com.google.devtools.build.lib.skyframe.InconsistentFilesystemException;
@@ -34,7 +34,6 @@ import com.google.devtools.build.lib.skyframe.PackageLookupValue;
 import com.google.devtools.build.lib.skyframe.WorkspaceFileValue;
 import com.google.devtools.build.lib.syntax.EvalException;
 import com.google.devtools.build.lib.syntax.Type;
-import com.google.devtools.build.lib.util.Fingerprint;
 import com.google.devtools.build.lib.util.Preconditions;
 import com.google.devtools.build.lib.vfs.FileSystemUtils;
 import com.google.devtools.build.lib.vfs.Path;
@@ -49,7 +48,6 @@ import com.google.devtools.build.skyframe.SkyValue;
 
 import java.io.IOException;
 import java.nio.charset.Charset;
-import java.util.Arrays;
 
 import javax.annotation.Nullable;
 
@@ -121,15 +119,6 @@ public abstract class RepositoryFunction {
     }
   }
 
-  private BlazeDirectories directories;
-
-  private byte[] computeRuleKey(Rule rule, byte[] ruleSpecificData) {
-    return new Fingerprint()
-        .addBytes(RuleSerializer.serializeRule(rule).build().toByteArray())
-        .addBytes(ruleSpecificData)
-        .digestAndReset();
-  }
-
   /**
    * Fetch the remote repository represented by the given rule.
    *
@@ -150,8 +139,9 @@ public abstract class RepositoryFunction {
    */
   @ThreadSafe
   @Nullable
-  public abstract SkyValue fetch(Rule rule, Path outputDirectory, Environment env)
-      throws SkyFunctionException, InterruptedException;
+  public abstract SkyValue fetch(
+      Rule rule, Path outputDirectory, BlazeDirectories directories, Environment env)
+          throws SkyFunctionException, InterruptedException;
 
   /**
    * Whether fetching is done using local operations only.
@@ -169,51 +159,8 @@ public abstract class RepositoryFunction {
    * to keep it working somehow)
    */
   protected byte[] getRuleSpecificMarkerData(Rule rule, Environment env)
-    throws RepositoryFunctionException {
+      throws RepositoryFunctionException {
     return new byte[] {};
-  }
-
-  private Path getMarkerPath(Rule rule) {
-    return getExternalRepositoryDirectory().getChild("@" + rule.getName() + ".marker");
-  }
-
-  /**
-   * Checks if the state of the repository in the file system is consistent with the rule in the
-   * WORKSPACE file.
-   *
-   * <p>Deletes the marker file if not so that no matter what happens after, the state of the file
-   * system stays consistent.
-   */
-  boolean isFilesystemUpToDate(Rule rule, byte[] ruleSpecificData)
-      throws RepositoryFunctionException {
-    try {
-      Path markerPath = getMarkerPath(rule);
-      if (!markerPath.exists()) {
-        return false;
-      }
-
-      boolean result = Arrays.equals(
-          computeRuleKey(rule, ruleSpecificData),
-          FileSystemUtils.readContent(markerPath));
-      if (!result) {
-        // So that we are in a consistent state if something happens while fetching the repository
-        markerPath.delete();
-      }
-
-      return result;
-
-    } catch (IOException e) {
-      throw new RepositoryFunctionException(e, Transience.TRANSIENT);
-    }
-  }
-
-  void writeMarkerFile(Rule rule, byte[] ruleSpecificData)
-      throws RepositoryFunctionException {
-    try {
-      FileSystemUtils.writeContent(getMarkerPath(rule), computeRuleKey(rule, ruleSpecificData));
-    } catch (IOException e) {
-      throw new RepositoryFunctionException(e, Transience.TRANSIENT);
-    }
   }
 
   protected Path prepareLocalRepositorySymlinkTree(Rule rule, Path repositoryDirectory)
@@ -254,8 +201,7 @@ public abstract class RepositoryFunction {
   }
 
   @VisibleForTesting
-  protected static PathFragment getTargetPath(Rule rule, Path workspace)
-      throws RepositoryFunctionException {
+  protected static PathFragment getTargetPath(Rule rule, Path workspace) {
     AggregatingAttributeMapper mapper = AggregatingAttributeMapper.of(rule);
     String path = mapper.get("path", Type.STRING);
     PathFragment pathFragment = new PathFragment(path);
@@ -330,9 +276,9 @@ public abstract class RepositoryFunction {
       if (value == null) {
         return null;
       }
-      // TODO(dmarting): stop at cycle and report a more intelligible error than cycle reporting.
       Package externalPackage = value.getPackage();
       if (externalPackage.containsErrors()) {
+        Event.replayEventsOn(env.getListener(), externalPackage.getEvents());
         throw new RepositoryFunctionException(
             new BuildFileContainsErrorsException(
                 Label.EXTERNAL_PACKAGE_IDENTIFIER, "Could not load //external package"),
@@ -350,7 +296,7 @@ public abstract class RepositoryFunction {
   @Nullable
   public static Rule getRule(
       String ruleName, @Nullable String ruleClassName, Environment env)
-      throws RepositoryFunctionException {
+          throws RepositoryFunctionException {
     try {
       return getRule(RepositoryName.create("@" + ruleName), ruleClassName, env);
     } catch (LabelSyntaxException e) {
@@ -368,7 +314,7 @@ public abstract class RepositoryFunction {
   @Nullable
   public static Rule getRule(
       RepositoryName repositoryName, @Nullable String ruleClassName, Environment env)
-      throws RepositoryFunctionException {
+          throws RepositoryFunctionException {
     Rule rule = getRule(repositoryName.strippedName(), env);
     Preconditions.checkState(
         rule == null || ruleClassName == null || rule.getRuleClass().equals(ruleClassName),
@@ -397,37 +343,11 @@ public abstract class RepositoryFunction {
     return value;
   }
 
-  /**
-   * Sets up output path information.
-   */
-  public void setDirectories(BlazeDirectories directories) {
-    this.directories = directories;
-  }
-
-  protected Path getExternalRepositoryDirectory() {
-    return RepositoryFunction.getExternalRepositoryDirectory(directories);
-  }
-
   public static Path getExternalRepositoryDirectory(BlazeDirectories directories) {
     return directories
         .getOutputBase()
         .getRelative(Label.EXTERNAL_PATH_PREFIX);
   }
-
-  /**
-   * Gets the base directory repositories should be stored in locally.
-   */
-  protected Path getOutputBase() {
-    return directories.getOutputBase();
-  }
-
-  /**
-   * Gets the directory the WORKSPACE file for the build is in.
-   */
-  protected Path getWorkspace() {
-    return directories.getWorkspace();
-  }
-
 
   /**
    * Returns the RuleDefinition class for this type of repository.

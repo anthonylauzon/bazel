@@ -166,6 +166,27 @@ public class BlazeServerStartupOptions extends OptionsBase {
           + "$OUTPUT_BASE")
   public boolean deepExecRoot;
 
+  @Option(
+    name = "experimental_oom_more_eagerly",
+    defaultValue = "false", // NOTE: purely decorative!  See class docstring.
+    category = "server startup",
+    help =
+        "If set, attempt to detect Java heap OOM conditions and exit before thrashing.  Only "
+            + "honored when --batch is also passed. In some cases, builds that previously succeeded"
+            + " may OOM if they were close to OOMing before."
+  )
+  public boolean oomMoreEagerly;
+
+  @Option(
+    name = "experimental_oom_more_eagerly_threshold",
+    defaultValue = "100", // NOTE: purely decorative!  See class docstring.
+    category = "server startup",
+    help =
+        "If --experimental_oom_more_eagerly is set, Blaze will OOM if, after two full GC's, more "
+            + "than this percentage of the (old gen) heap is still occupied."
+  )
+  public int oomMoreEagerlyThreshold;
+
   @Option(name = "block_for_lock",
       defaultValue = "true", // NOTE: purely decorative!  See class docstring.
       category = "server startup",
@@ -236,4 +257,10 @@ public class BlazeServerStartupOptions extends OptionsBase {
           + "invocation_policy.InvocationPolicy proto. Unlike other options, it is an error to "
           + "specify --invocation_policy multiple times.")
   public String invocationPolicy;
+
+  @Option(name = "grpc_port",
+      defaultValue = "-1",
+      category = "undocumented",
+      help = "Port to start up the gRPC command server on. If 0, let the kernel choose.")
+  public int grpcPort;
 }

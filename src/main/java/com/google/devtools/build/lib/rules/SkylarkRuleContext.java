@@ -112,9 +112,9 @@ public final class SkylarkRuleContext {
       "A <code>struct</code> containing files defined in label or label list "
           + "type attributes. The struct fields correspond to the attribute names. The struct "
           + "values are <code>list</code> of <code>file</code>s. If an optional attribute is "
-          + "not specified in the rule, an empty list is generated."
+          + "not specified in the rule, an empty list is generated. "
           + "It is a shortcut for:"
-          + "<pre class=language-python>[f for t in ctx.attr.<ATTR> for f in t.files]</pre>";
+          + "<pre class=language-python>[f for t in ctx.attr.&lt;ATTR&gt; for f in t.files]</pre>";
   public static final String FILE_DOC =
       "A <code>struct</code> containing files defined in label type "
           + "attributes marked as <code>single_file=True</code>. The struct fields correspond "
@@ -123,7 +123,7 @@ public final class SkylarkRuleContext {
           + "then the corresponding struct value is <code>None</code>. If a label type is not "
           + "marked as <code>single_file=True</code>, no corresponding struct field is generated. "
           + "It is a shortcut for:"
-          + "<pre class=language-python>list(ctx.attr.<ATTR>.files)[0]</pre>";
+          + "<pre class=language-python>list(ctx.attr.&lt;ATTR&gt;.files)[0]</pre>";
   public static final String ATTR_DOC =
       "A struct to access the values of the attributes. The values are provided by "
           + "the user (if not, a default value is used).";
@@ -473,21 +473,13 @@ public final class SkylarkRuleContext {
   }
 
   @SkylarkCallable(name = "fragments", structField = true,
-      doc = "Allows access to configuration fragments in target configuration. "
-          + "Possible fields are <code>apple</code>, <code>cpp</code>, "
-          + "<code>java</code> and <code>jvm</code>. "
-          + "However, rules have to declare their required fragments in order to access them "
-          + "(see <a href=\"../rules.html#fragments\">here</a>).")
+      doc = "Allows access to configuration fragments in target configuration.")
   public FragmentCollection getFragments() {
     return fragments;
   }
 
   @SkylarkCallable(name = "host_fragments", structField = true,
-      doc = "Allows access to configuration fragments in host configuration. "
-          + "Possible fields are <code>apple</code>, <code>cpp</code>, "
-          + "<code>java</code> and <code>jvm</code>. "
-          + "However, rules have to declare their required fragments in order to access them "
-          + "(see <a href=\"../rules.html#fragments\">here</a>).")
+      doc = "Allows access to configuration fragments in host configuration.")
   public FragmentCollection getHostFragments() {
     return hostFragments;
   }
@@ -504,6 +496,13 @@ public final class SkylarkRuleContext {
           + "configuration</a> type for more details.")
   public BuildConfiguration getHostConfiguration() {
     return ruleContext.getHostConfiguration();
+  }
+
+  @SkylarkCallable(name = "features", structField = true,
+      doc = "Returns the set of features that are enabled for this rule."
+  )
+  public ImmutableList<String> getFeatures() {
+    return ImmutableList.copyOf(ruleContext.getFeatures());
   }
 
   @SkylarkCallable(structField = true, doc = OUTPUTS_DOC)
@@ -568,23 +567,13 @@ public final class SkylarkRuleContext {
     }
   }
 
-  private boolean isForAspect() {
-    return ruleAttributesCollection != null;
-  }
-
   @SkylarkCallable(
     doc =
         "Creates a file object with the given filename, in the current package. "
             + DOC_NEW_FILE_TAIL
   )
   public Artifact newFile(String filename) {
-    return newFile(newFileRoot(), filename);
-  }
-
-  private Root newFileRoot() {
-    return isForAspect()
-        ? getConfiguration().getBinDirectory()
-        : ruleContext.getBinOrGenfilesDirectory();
+    return newFile(ruleContext.getBinOrGenfilesDirectory(), filename);
   }
 
   // Kept for compatibility with old code.
@@ -599,7 +588,8 @@ public final class SkylarkRuleContext {
   public Artifact newFile(Artifact baseArtifact, String newBaseName) {
     PathFragment original = baseArtifact.getRootRelativePath();
     PathFragment fragment = original.replaceName(newBaseName);
-    return ruleContext.getDerivedArtifact(fragment, newFileRoot());
+    Root root = ruleContext.getBinOrGenfilesDirectory();
+    return ruleContext.getDerivedArtifact(fragment, root);
   }
 
   // Kept for compatibility with old code.

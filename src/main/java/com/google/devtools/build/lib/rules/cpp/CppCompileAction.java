@@ -28,7 +28,6 @@ import com.google.devtools.build.lib.actions.ActionInput;
 import com.google.devtools.build.lib.actions.ActionOwner;
 import com.google.devtools.build.lib.actions.Artifact;
 import com.google.devtools.build.lib.actions.Artifact.ArtifactExpander;
-import com.google.devtools.build.lib.actions.ArtifactFile;
 import com.google.devtools.build.lib.actions.ArtifactResolver;
 import com.google.devtools.build.lib.actions.ExecException;
 import com.google.devtools.build.lib.actions.Executor;
@@ -88,24 +87,31 @@ import javax.annotation.concurrent.GuardedBy;
 @ThreadCompatible
 public class CppCompileAction extends AbstractAction implements IncludeScannable {
   /**
-   * Represents logic that determines which artifacts, if any, should be added to the actual inputs
-   * for each included file (in addition to the included file itself)
+   * Represents logic that determines if an artifact is a special input, meaning that it may require
+   * additional inputs when it is compiled or may not be available to other actions.
    */
-  public interface IncludeResolver {
-    /**
-     * Returns the set of files to be added for an included file (as returned in the .d file)
-     */
+  public interface SpecialInputsHandler {
+    /** Returns if {@code includedFile} is special, so may not be available to other actions. */
+    boolean isSpecialFile(Artifact includedFile);
+
+    /** Returns the set of files to be added for an included file (as returned in the .d file). */
     Collection<Artifact> getInputsForIncludedFile(
         Artifact includedFile, ArtifactResolver artifactResolver);
   }
 
-  public static final IncludeResolver VOID_INCLUDE_RESOLVER = new IncludeResolver() {
-    @Override
-    public Collection<Artifact> getInputsForIncludedFile(Artifact includedFile,
-        ArtifactResolver artifactResolver) {
-      return ImmutableList.of();
-    }
-  };
+  static final SpecialInputsHandler VOID_SPECIAL_INPUTS_HANDLER =
+      new SpecialInputsHandler() {
+        @Override
+        public boolean isSpecialFile(Artifact includedFile) {
+          return false;
+        }
+
+        @Override
+        public Collection<Artifact> getInputsForIncludedFile(
+            Artifact includedFile, ArtifactResolver artifactResolver) {
+          return ImmutableList.of();
+        }
+      };
 
   private static final int VALIDATION_DEBUG = 0;  // 0==none, 1==warns/errors, 2==all
   private static final boolean VALIDATION_DEBUG_WARN = VALIDATION_DEBUG >= 1;
@@ -153,13 +159,14 @@ public class CppCompileAction extends AbstractAction implements IncludeScannable
   private final CppCompilationContext context;
   private final Collection<PathFragment> extraSystemIncludePrefixes;
   private final Iterable<IncludeScannable> lipoScannables;
+  private final ImmutableList<Artifact> builtinIncludeFiles;
   private final CppCompileCommandLine cppCompileCommandLine;
   private final boolean usePic;
 
   @VisibleForTesting
   final CppConfiguration cppConfiguration;
   protected final Class<? extends CppCompileActionContext> actionContext;
-  private final IncludeResolver includeResolver;
+  private final SpecialInputsHandler specialInputsHandler;
 
   /**
    * Identifier for the actual execution time behavior of the action.
@@ -207,7 +214,8 @@ public class CppCompileAction extends AbstractAction implements IncludeScannable
    * @param copts options for the compiler
    * @param coptsFilter regular expression to remove options from {@code copts}
    */
-  protected CppCompileAction(ActionOwner owner,
+  protected CppCompileAction(
+      ActionOwner owner,
       // TODO(bazel-team): Eventually we will remove 'features'; all functionality in 'features'
       // will be provided by 'featureConfiguration'.
       ImmutableList<String> features,
@@ -231,13 +239,14 @@ public class CppCompileAction extends AbstractAction implements IncludeScannable
       Predicate<String> coptsFilter,
       ImmutableList<PathFragment> extraSystemIncludePrefixes,
       @Nullable String fdoBuildStamp,
-      IncludeResolver includeResolver,
+      SpecialInputsHandler specialInputsHandler,
       Iterable<IncludeScannable> lipoScannables,
       UUID actionClassId,
       boolean usePic,
       RuleContext ruleContext) {
     super(owner,
-          createInputs(mandatoryInputs, context.getCompilationPrerequisites(), optionalSourceFile),
+          createInputs(ruleContext,
+              mandatoryInputs, context.getCompilationPrerequisites(), optionalSourceFile),
           CollectionUtils.asListWithoutNulls(outputFile,
               (dotdFile == null ? null : dotdFile.artifact()),
               gcnoFile, dwoFile));
@@ -248,7 +257,7 @@ public class CppCompileAction extends AbstractAction implements IncludeScannable
     this.optionalSourceFile = optionalSourceFile;
     this.context = context;
     this.extraSystemIncludePrefixes = extraSystemIncludePrefixes;
-    this.includeResolver = includeResolver;
+    this.specialInputsHandler = specialInputsHandler;
     this.cppConfiguration = cppConfiguration;
     // inputsKnown begins as the logical negation of shouldScanIncludes.
     // When scanning includes, the inputs begin as not known, and become
@@ -260,6 +269,7 @@ public class CppCompileAction extends AbstractAction implements IncludeScannable
         new CppCompileCommandLine(
             sourceFile,
             dotdFile,
+            dwoFile,
             copts,
             coptsFilter,
             pluginOpts,
@@ -275,6 +285,7 @@ public class CppCompileAction extends AbstractAction implements IncludeScannable
     // We do not need to include the middleman artifact since it is a generated
     // artifact and will definitely exist prior to this action execution.
     this.mandatoryInputs = mandatoryInputs;
+    this.builtinIncludeFiles = CppHelper.getToolchain(ruleContext).getBuiltinIncludeFiles();
     verifyIncludePaths(ruleContext);
   }
 
@@ -309,13 +320,16 @@ public class CppCompileAction extends AbstractAction implements IncludeScannable
   }
 
   private static NestedSet<Artifact> createInputs(
+      RuleContext ruleContext,
       NestedSet<Artifact> mandatoryInputs,
-      Set<Artifact> prerequisites, Artifact optionalSourceFile) {
+      Set<Artifact> prerequisites,
+      Artifact optionalSourceFile) {
     NestedSetBuilder<Artifact> builder = NestedSetBuilder.stableOrder();
     if (optionalSourceFile != null) {
       builder.add(optionalSourceFile);
     }
     builder.addAll(prerequisites);
+    builder.addAll(CppHelper.getToolchain(ruleContext).getBuiltinIncludeFiles());
     builder.addTransitive(mandatoryInputs);
     return builder.build();
   }
@@ -341,8 +355,8 @@ public class CppCompileAction extends AbstractAction implements IncludeScannable
 
   @Nullable
   @Override
-  public Artifact getBuiltInIncludeFile() {
-    return cppConfiguration.getBuiltInIncludeFile();
+  public List<Artifact> getBuiltInIncludeFiles() {
+    return builtinIncludeFiles;
   }
 
   public String getHostSystemName() {
@@ -406,10 +420,10 @@ public class CppCompileAction extends AbstractAction implements IncludeScannable
     ArtifactResolver artifactResolver =
         executor.getContext(IncludeScanningContext.class).getArtifactResolver();
     for (Artifact artifact : initialResult) {
-      result.addAll(includeResolver.getInputsForIncludedFile(artifact, artifactResolver));
+      result.addAll(specialInputsHandler.getInputsForIncludedFile(artifact, artifactResolver));
     }
     for (Artifact artifact : getInputs()) {
-      result.addAll(includeResolver.getInputsForIncludedFile(artifact, artifactResolver));
+      result.addAll(specialInputsHandler.getInputsForIncludedFile(artifact, artifactResolver));
     }
     // TODO(ulfjack): This only works if include scanning is enabled; the cleanup is in progress,
     // and this needs to be fixed before we can even consider disabling it.
@@ -565,9 +579,6 @@ public class CppCompileAction extends AbstractAction implements IncludeScannable
   @Override
   public Collection<Artifact> getIncludeScannerSources() {
     NestedSetBuilder<Artifact> builder = NestedSetBuilder.stableOrder();
-    // For every header module we use for the build we need the set of sources that it can
-    // reference.
-    builder.addTransitive(context.getTransitiveHeaderModuleSrcs());
     if (CppFileTypes.CPP_MODULE_MAP.matches(getSourceFile().getPath())) {
       // If this is an action that compiles the header module itself, the source we build is the
       // module map, and we need to include-scan all headers that are referenced in the module map.
@@ -647,6 +658,12 @@ public class CppCompileAction extends AbstractAction implements IncludeScannable
   }
 
   @Override
+  public boolean extraActionCanAttach() {
+    return cppConfiguration.alwaysAttachExtraActions()
+        || !specialInputsHandler.isSpecialFile(getPrimaryInput());
+  }
+
+  @Override
   public ExtraActionInfo.Builder getExtraActionInfo() {
     CppCompileInfo.Builder info = CppCompileInfo.newBuilder();
     info.setTool(cppConfiguration.getToolPathFragment(Tool.GCC).getPathString());
@@ -702,7 +719,7 @@ public class CppCompileAction extends AbstractAction implements IncludeScannable
       throws ActionExecutionException {
     IncludeProblems errors = new IncludeProblems();
     IncludeProblems warnings = new IncludeProblems();
-    Set<ArtifactFile> allowedIncludes = new HashSet<>();
+    Set<Artifact> allowedIncludes = new HashSet<>();
     for (Artifact input : mandatoryInputs) {
       if (input.isMiddlemanArtifact() || input.isTreeArtifact()) {
         artifactExpander.expand(input, allowedIncludes);
@@ -942,7 +959,7 @@ public class CppCompileAction extends AbstractAction implements IncludeScannable
           inputs.add(artifact);
           // In some cases, execution backends need extra files for each included file. Add them
           // to the set of actual inputs.
-          inputs.addAll(includeResolver.getInputsForIncludedFile(artifact, artifactResolver));
+          inputs.addAll(specialInputsHandler.getInputsForIncludedFile(artifact, artifactResolver));
         } else {
           // Abort if we see files that we can't resolve, likely caused by
           // undeclared includes or illegal include constructs.
@@ -1236,6 +1253,7 @@ public class CppCompileAction extends AbstractAction implements IncludeScannable
   public final class CppCompileCommandLine {
     private final Artifact sourceFile;
     private final DotdFile dotdFile;
+    @Nullable private final Artifact dwoFile;
     private final List<String> copts;
     private final Predicate<String> coptsFilter;
     private final List<String> pluginOpts;
@@ -1249,6 +1267,7 @@ public class CppCompileAction extends AbstractAction implements IncludeScannable
     public CppCompileCommandLine(
         Artifact sourceFile,
         DotdFile dotdFile,
+        @Nullable Artifact dwoFile,
         ImmutableList<String> copts,
         Predicate<String> coptsFilter,
         ImmutableList<String> pluginOpts,
@@ -1259,6 +1278,7 @@ public class CppCompileAction extends AbstractAction implements IncludeScannable
       this.sourceFile = Preconditions.checkNotNull(sourceFile);
       this.dotdFile = CppFileTypes.mustProduceDotdFile(sourceFile.getPath().toString())
                       ? Preconditions.checkNotNull(dotdFile) : null;
+      this.dwoFile = dwoFile;
       this.copts = Preconditions.checkNotNull(copts);
       this.coptsFilter = coptsFilter;
       this.pluginOpts = Preconditions.checkNotNull(pluginOpts);
@@ -1366,10 +1386,10 @@ public class CppCompileAction extends AbstractAction implements IncludeScannable
       // the amount of debug information requested, and whether the debug info is written in a
       // split out file. Until then, keep this before the user-provided copts so it can be
       // overwritten.
-      if (cppConfiguration.useFission()) {
+      if (dwoFile != null) {
         options.add("-gsplit-dwarf");
       }
-      
+
       // Users don't expect the explicit copts to be filtered by coptsFilter, add them verbatim.
       // Make sure these are added after the options from the feature configuration, so that
       // those options can be overriden.

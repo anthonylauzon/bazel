@@ -27,6 +27,7 @@ import com.google.devtools.build.lib.analysis.RuleConfiguredTarget.Mode;
 import com.google.devtools.build.lib.analysis.RuleConfiguredTargetBuilder;
 import com.google.devtools.build.lib.analysis.RuleContext;
 import com.google.devtools.build.lib.analysis.RunfilesSupport;
+import com.google.devtools.build.lib.analysis.SkylarkProviders;
 import com.google.devtools.build.lib.collect.nestedset.NestedSetBuilder;
 import com.google.devtools.build.lib.rules.RuleConfiguredTargetFactory;
 import com.google.devtools.build.lib.rules.apple.AppleConfiguration;
@@ -37,6 +38,7 @@ import com.google.devtools.build.lib.rules.objc.ObjcCommon.CompilationAttributes
 import com.google.devtools.build.lib.rules.objc.ObjcCommon.ResourceAttributes;
 import com.google.devtools.build.lib.rules.objc.ReleaseBundlingSupport.LinkedBinary;
 import com.google.devtools.build.lib.rules.test.InstrumentedFilesProvider;
+import com.google.devtools.build.lib.syntax.ClassObject.SkylarkClassObject;
 
 /**
  * Implementation for rules that link binaries.
@@ -102,7 +104,10 @@ abstract class BinaryLinkingTargetFactory implements RuleConfiguredTargetFactory
             .registerCompileAndArchiveActions(common)
             .addXcodeSettings(xcodeProviderBuilder, common)
             .registerLinkActions(
-                objcProvider, getExtraLinkArgs(ruleContext), ImmutableList.<Artifact>of())
+                objcProvider,
+                getExtraLinkArgs(ruleContext),
+                ImmutableList.<Artifact>of(),
+                DsymOutputType.APP)
             .validateAttributes();
 
     if (ruleContext.hasErrors()) {
@@ -116,13 +121,17 @@ abstract class BinaryLinkingTargetFactory implements RuleConfiguredTargetFactory
         ObjcConfiguration objcConfiguration = ObjcRuleClasses.objcConfiguration(ruleContext);
         AppleConfiguration appleConfiguration = ruleContext.getFragment(AppleConfiguration.class);
         // TODO(bazel-team): Remove once all bundle users are migrated to ios_application.
-        ReleaseBundlingSupport releaseBundlingSupport = new ReleaseBundlingSupport(
-            ruleContext, objcProvider, LinkedBinary.LOCAL_AND_DEPENDENCIES,
-            ReleaseBundlingSupport.APP_BUNDLE_DIR_FORMAT, objcConfiguration.getMinimumOs());
+        ReleaseBundlingSupport releaseBundlingSupport =
+            new ReleaseBundlingSupport(
+                ruleContext,
+                objcProvider,
+                LinkedBinary.LOCAL_AND_DEPENDENCIES,
+                ReleaseBundlingSupport.APP_BUNDLE_DIR_FORMAT,
+                objcConfiguration.getMinimumOs());
         releaseBundlingSupport
-            .registerActions()
+            .registerActions(DsymOutputType.APP)
             .addXcodeSettings(xcodeProviderBuilder)
-            .addFilesToBuild(filesToBuild)
+            .addFilesToBuild(filesToBuild, DsymOutputType.APP)
             .validateResources()
             .validateAttributes();
 
@@ -163,7 +172,10 @@ abstract class BinaryLinkingTargetFactory implements RuleConfiguredTargetFactory
             .addProvider(ObjcProvider.class, objcProvider)
             .addProvider(
                 InstrumentedFilesProvider.class,
-                compilationSupport.getInstrumentedFilesProvider(common));
+                compilationSupport.getInstrumentedFilesProvider(common))
+            .addSkylarkTransitiveInfo(
+                ObjcProvider.OBJC_SKYLARK_PROVIDER_NAME,
+                common.getObjcProvider().toSkylarkProvider());
     if (xcTestAppProvider.isPresent()) {
       // TODO(bazel-team): Stop exporting an XcTestAppProvider once objc_binary no longer creates an
       // application bundle.
@@ -209,13 +221,38 @@ abstract class BinaryLinkingTargetFactory implements RuleConfiguredTargetFactory
             .setHasModuleMap()
             .setLinkedBinary(intermediateArtifacts.strippedSingleArchitectureBinary());
 
+    builder.addDepObjcProviders(createSkylarkObjcProviders(ruleContext));
+    
     if (ObjcRuleClasses.objcConfiguration(ruleContext).generateDebugSymbols()) {
-      builder.setBreakpadFile(intermediateArtifacts.breakpadSym());
+      builder.addDebugArtifacts(DsymOutputType.APP);
+    }
+
+    if (ObjcRuleClasses.objcConfiguration(ruleContext).generateLinkmap()) {
+      builder.setLinkmapFile(intermediateArtifacts.linkmap());
     }
 
     return builder.build();
   }
 
+  /**
+   * Constructs an ObjcProvider instance for each skylark objc provider in this target's
+   * dependencies.
+   */
+  private Iterable<ObjcProvider> createSkylarkObjcProviders(RuleContext ruleContext) {
+     ImmutableList.Builder<ObjcProvider> skylarkProviderListBuilder = ImmutableList.builder();
+    for (SkylarkProviders skylarkProviders :
+        ruleContext.getPrerequisites("deps", Mode.TARGET, SkylarkProviders.class)) {
+      Object objcSkylarkProvider =
+          skylarkProviders.getValue(ObjcProvider.OBJC_SKYLARK_PROVIDER_TO_EXPORT_NAME);
+      if (objcSkylarkProvider != null) {
+        ObjcProvider objcProviderFromSkylark =
+            ObjcProvider.fromSkylarkProvider((SkylarkClassObject) objcSkylarkProvider);
+        skylarkProviderListBuilder.add(objcProviderFromSkylark);
+      }
+    }
+    return skylarkProviderListBuilder.build();
+  }
+  
   /**
    * Performs additional configuration of the target. The default implementation does nothing, but
    * subclasses may override it to add logic.

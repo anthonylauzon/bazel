@@ -83,6 +83,8 @@ import com.google.devtools.build.lib.rules.apple.AppleConfiguration;
 import com.google.devtools.build.lib.rules.apple.AppleToolchain;
 import com.google.devtools.build.lib.rules.apple.XcodeConfigRule;
 import com.google.devtools.build.lib.rules.apple.XcodeVersionRule;
+import com.google.devtools.build.lib.rules.apple.cpp.AppleCcToolchainRule;
+import com.google.devtools.build.lib.rules.cpp.CcIncLibraryRule;
 import com.google.devtools.build.lib.rules.cpp.CcToolchainRule;
 import com.google.devtools.build.lib.rules.cpp.CcToolchainSuiteRule;
 import com.google.devtools.build.lib.rules.cpp.CppBuildInfo;
@@ -96,6 +98,9 @@ import com.google.devtools.build.lib.rules.java.JavaOptions;
 import com.google.devtools.build.lib.rules.java.JavaToolchainRule;
 import com.google.devtools.build.lib.rules.java.JvmConfigurationLoader;
 import com.google.devtools.build.lib.rules.java.ProguardLibraryRule;
+import com.google.devtools.build.lib.rules.objc.AppleSkylarkCommon;
+import com.google.devtools.build.lib.rules.objc.AppleWatch1ExtensionRule;
+import com.google.devtools.build.lib.rules.objc.AppleWatchExtensionBinaryRule;
 import com.google.devtools.build.lib.rules.objc.IosApplicationRule;
 import com.google.devtools.build.lib.rules.objc.IosDeviceRule;
 import com.google.devtools.build.lib.rules.objc.IosExtensionBinaryRule;
@@ -115,7 +120,6 @@ import com.google.devtools.build.lib.rules.objc.ObjcConfigurationLoader;
 import com.google.devtools.build.lib.rules.objc.ObjcFrameworkRule;
 import com.google.devtools.build.lib.rules.objc.ObjcImportRule;
 import com.google.devtools.build.lib.rules.objc.ObjcLibraryRule;
-import com.google.devtools.build.lib.rules.objc.ObjcOptionsRule;
 import com.google.devtools.build.lib.rules.objc.ObjcProtoLibraryRule;
 import com.google.devtools.build.lib.rules.objc.ObjcRuleClasses;
 import com.google.devtools.build.lib.rules.objc.ObjcXcodeprojRule;
@@ -229,9 +233,10 @@ public class BazelRuleClassProvider {
    * Java objects accessible from Skylark rule implementations using this module.
    */
   public static final ImmutableMap<String, SkylarkType> skylarkBuiltinJavaObects =
-      ImmutableMap.of("android_common", SkylarkType.of(AndroidSkylarkCommon.class));
-
-
+      ImmutableMap.of(
+          "android_common", SkylarkType.of(AndroidSkylarkCommon.class),
+          "apple_common", SkylarkType.of(AppleSkylarkCommon.class));
+          
   public static void setup(ConfiguredRuleClassProvider.Builder builder) {
     builder
         .addBuildInfoFactory(new BazelJavaBuildInfoFactory())
@@ -275,7 +280,9 @@ public class BazelRuleClassProvider {
     builder.addRuleDefinition(new BazelProtoLibraryRule());
 
     builder.addRuleDefinition(new CcToolchainRule());
+    builder.addRuleDefinition(new AppleCcToolchainRule());
     builder.addRuleDefinition(new CcToolchainSuiteRule());
+    builder.addRuleDefinition(new CcIncLibraryRule());
     builder.addRuleDefinition(new BazelCppRuleClasses.CcLinkingRule());
     builder.addRuleDefinition(new BazelCppRuleClasses.CcDeclRule());
     builder.addRuleDefinition(new BazelCppRuleClasses.CcBaseRule());
@@ -285,6 +292,7 @@ public class BazelRuleClassProvider {
     builder.addRuleDefinition(new BazelCppRuleClasses.CcTestRule());
     builder.addRuleDefinition(new BazelCppRuleClasses.CcLibraryBaseRule());
     builder.addRuleDefinition(new BazelCppRuleClasses.CcLibraryRule());
+    builder.addRuleDefinition(new BazelCppRuleClasses.BazelCcIncLibraryRule());
 
     builder.addRuleDefinition(new BazelPyRuleClasses.PyBaseRule());
     builder.addRuleDefinition(new BazelPyRuleClasses.PyBinaryBaseRule());
@@ -293,13 +301,13 @@ public class BazelRuleClassProvider {
     builder.addRuleDefinition(new BazelPyTestRule());
 
     try {
-      builder.addWorkspaceFile(
+      builder.addWorkspaceFilePrefix(
           ResourceFileLoader.loadResource(BazelRuleClassProvider.class, "tools.WORKSPACE"));
-      builder.addWorkspaceFile(
+      builder.addWorkspaceFilePrefix(
           ResourceFileLoader.loadResource(BazelJavaRuleClasses.class, "jdk.WORKSPACE"));
-      builder.addWorkspaceFile(
+      builder.addWorkspaceFilePrefix(
           ResourceFileLoader.loadResource(BazelAndroidSemantics.class, "android.WORKSPACE"));
-      builder.addWorkspaceFile(
+      builder.addWorkspaceFilePrefix(
           ResourceFileLoader.loadResource(BazelJ2ObjcLibraryRule.class, "j2objc.WORKSPACE"));
     } catch (IOException e) {
       throw new IllegalStateException(e);
@@ -337,7 +345,6 @@ public class BazelRuleClassProvider {
     builder.addRuleDefinition(new ObjcFrameworkRule());
     builder.addRuleDefinition(new ObjcImportRule());
     builder.addRuleDefinition(new ObjcLibraryRule());
-    builder.addRuleDefinition(new ObjcOptionsRule());
     builder.addRuleDefinition(new ObjcProtoLibraryRule());
     builder.addRuleDefinition(new ObjcXcodeprojRule());
     builder.addRuleDefinition(new ObjcRuleClasses.CoptsRule());
@@ -349,13 +356,17 @@ public class BazelRuleClassProvider {
     builder.addRuleDefinition(new ObjcRuleClasses.ResourcesRule());
     builder.addRuleDefinition(new ObjcRuleClasses.XcodegenRule());
     builder.addRuleDefinition(new ObjcRuleClasses.AlwaysLinkRule());
-    builder.addRuleDefinition(new ObjcRuleClasses.OptionsRule());
     builder.addRuleDefinition(new ObjcRuleClasses.SdkFrameworksDependerRule());
     builder.addRuleDefinition(new ObjcRuleClasses.CompileDependencyRule());
     builder.addRuleDefinition(new ObjcRuleClasses.ResourceToolsRule());
     builder.addRuleDefinition(new ObjcRuleClasses.XcrunRule());
     builder.addRuleDefinition(new ObjcRuleClasses.IpaRule());
+    builder.addRuleDefinition(new ObjcRuleClasses.ReleaseBundlingToolsRule());
+    builder.addRuleDefinition(new ObjcRuleClasses.WatchExtensionBundleRule());
+    builder.addRuleDefinition(new ObjcRuleClasses.WatchApplicationBundleRule());
     builder.addRuleDefinition(new AppleToolchain.RequiresXcodeConfigRule());
+    builder.addRuleDefinition(new AppleWatch1ExtensionRule());
+    builder.addRuleDefinition(new AppleWatchExtensionBinaryRule());
     builder.addRuleDefinition(new IosApplicationRule());
     builder.addRuleDefinition(new IosExtensionBinaryRule());
     builder.addRuleDefinition(new IosExtensionRule());

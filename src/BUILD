@@ -92,7 +92,7 @@ genrule(
     srcs = [
         ":create_embedded_tools.sh",
         "//tools:embedded_tools_srcs",
-        "//third_party:srcs",
+        "//third_party:embedded_tools_srcs",
         "//src/java_tools/buildjar/java/com/google/devtools/build/buildjar/jarhelper:srcs",
         "//src/tools/android/java/com/google/devtools/build/android:embedded_tools",
         "//src/tools/android/java/com/google/devtools/build/android/ideinfo:embedded_tools",
@@ -155,7 +155,10 @@ genrule(
         "package-zip" + suffix,
     ],
     outs = ["bazel" + suffix],
-    cmd = "cat $(location //src/main/cpp:client) $(location :package-zip" + suffix + ") > $@ && zip -qA $@",
+    # In msys, a file path without .exe suffix(say foo), refers to a file with .exe
+    # suffix(say foo.exe), if foo.exe exists and foo doesn't. So, on windows, we
+    # need to remove bazel.exe first, so that cat to bazel won't fail.
+    cmd = "rm -f $@; cat $(location //src/main/cpp:client) $(location :package-zip" + suffix + ") > $@ && zip -qA $@",
     executable = 1,
     output_to_bindir = 1,
     visibility = [

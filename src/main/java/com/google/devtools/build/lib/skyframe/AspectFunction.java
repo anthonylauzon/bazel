@@ -31,6 +31,7 @@ import com.google.devtools.build.lib.collect.nestedset.NestedSetBuilder;
 import com.google.devtools.build.lib.collect.nestedset.Order;
 import com.google.devtools.build.lib.events.Event;
 import com.google.devtools.build.lib.events.StoredEventHandler;
+import com.google.devtools.build.lib.packages.Aspect;
 import com.google.devtools.build.lib.packages.Attribute;
 import com.google.devtools.build.lib.packages.BuildFileContainsErrorsException;
 import com.google.devtools.build.lib.packages.NativeAspectClass;
@@ -60,6 +61,15 @@ import javax.annotation.Nullable;
 
 /**
  * The Skyframe function that generates aspects.
+ *
+ * {@link AspectFunction} takes a SkyKey containing an {@link AspectKey} [a tuple of
+ * (target label, configurations, aspect class and aspect parameters)],
+ * loads an {@link Aspect} from aspect class and aspect parameters,
+ * gets a {@link ConfiguredTarget} for label and configurations, and then creates
+ * a {@link ConfiguredAspect} for a given {@link AspectKey}.
+ *
+ * See {@link com.google.devtools.build.lib.packages.AspectClass} documentation
+ * for an overview of aspect-related classes
  */
 public final class AspectFunction implements SkyFunction {
   private final BuildViewProvider buildViewProvider;
@@ -110,9 +120,12 @@ public final class AspectFunction implements SkyFunction {
     NestedSetBuilder<Label> transitiveRootCauses = NestedSetBuilder.stableOrder();
     AspectKey key = (AspectKey) skyKey.argument();
     ConfiguredAspectFactory aspectFactory;
+    Aspect aspect;
     if (key.getAspectClass() instanceof NativeAspectClass<?>) {
+      NativeAspectClass<?> nativeAspectClass = (NativeAspectClass<?>) key.getAspectClass();
       aspectFactory =
-          (ConfiguredAspectFactory) ((NativeAspectClass<?>) key.getAspectClass()).newInstance();
+          (ConfiguredAspectFactory) nativeAspectClass.newInstance();
+      aspect = Aspect.forNative(nativeAspectClass, key.getParameters());
     } else if (key.getAspectClass() instanceof SkylarkAspectClass) {
       SkylarkAspectClass skylarkAspectClass = (SkylarkAspectClass) key.getAspectClass();
       SkylarkAspect skylarkAspect;
@@ -127,7 +140,11 @@ public final class AspectFunction implements SkyFunction {
         return null;
       }
 
-      aspectFactory = new SkylarkAspectFactory(skylarkAspect.getName(), skylarkAspect);
+      aspectFactory = new SkylarkAspectFactory(skylarkAspect);
+      aspect = Aspect.forSkylark(
+          skylarkAspect.getAspectClass(),
+          skylarkAspect.getDefinition(),
+          key.getParameters());
     } else {
       throw new IllegalStateException();
     }
@@ -202,7 +219,7 @@ public final class AspectFunction implements SkyFunction {
               env,
               resolver,
               originalTargetAndAspectConfiguration,
-              key.getAspect(),
+              aspect,
               configConditions,
               ruleClassProvider,
               view.getHostConfiguration(originalTargetAndAspectConfiguration.getConfiguration()),
@@ -219,6 +236,7 @@ public final class AspectFunction implements SkyFunction {
       return createAspect(
           env,
           key,
+          aspect,
           aspectFactory,
           associatedTarget,
           key.getAspectConfiguration(),
@@ -245,6 +263,7 @@ public final class AspectFunction implements SkyFunction {
   private AspectValue createAspect(
       Environment env,
       AspectKey key,
+      Aspect aspect,
       ConfiguredAspectFactory aspectFactory,
       RuleConfiguredTarget associatedTarget,
       BuildConfiguration aspectConfiguration,
@@ -267,7 +286,7 @@ public final class AspectFunction implements SkyFunction {
             analysisEnvironment,
             associatedTarget,
             aspectFactory,
-            key.getAspect(),
+            aspect,
             directDeps,
             configConditions,
             aspectConfiguration,
@@ -291,6 +310,7 @@ public final class AspectFunction implements SkyFunction {
 
     return new AspectValue(
         key,
+        aspect,
         associatedTarget.getLabel(),
         associatedTarget.getTarget().getLocation(),
         configuredAspect,

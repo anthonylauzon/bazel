@@ -17,7 +17,6 @@ package com.google.devtools.build.lib.analysis;
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Function;
 import com.google.common.base.Predicate;
-import com.google.common.cache.LoadingCache;
 import com.google.common.collect.ArrayListMultimap;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableListMultimap;
@@ -33,7 +32,6 @@ import com.google.devtools.build.lib.actions.ActionGraph;
 import com.google.devtools.build.lib.actions.Artifact;
 import com.google.devtools.build.lib.actions.ArtifactFactory;
 import com.google.devtools.build.lib.actions.ArtifactOwner;
-import com.google.devtools.build.lib.actions.PackageRootResolver;
 import com.google.devtools.build.lib.actions.Root;
 import com.google.devtools.build.lib.analysis.ExtraActionArtifactsProvider.ExtraArtifactSet;
 import com.google.devtools.build.lib.analysis.config.BinTools;
@@ -89,7 +87,6 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.concurrent.ExecutionException;
 import java.util.logging.Logger;
 
 import javax.annotation.Nullable;
@@ -262,10 +259,6 @@ public class BuildView {
     return skyframeExecutor.getLastWorkspaceStatusActionForTesting();
   }
 
-  public TransitiveInfoCollection getGeneratingRule(OutputFileConfiguredTarget target) {
-    return target.getGeneratingRule();
-  }
-
   @Override
   public int hashCode() {
     throw new UnsupportedOperationException();  // avoid nondeterminism
@@ -410,13 +403,6 @@ public class BuildView {
         });
   }
 
-  private void prepareToBuild(BuildConfigurationCollection configurations,
-      PackageRootResolver resolver) throws ViewCreationFailedException {
-    for (BuildConfiguration config : configurations.getAllConfigurations()) {
-      config.prepareToBuild(directories.getExecRoot(), getArtifactFactory(), resolver);
-    }
-  }
-
   @ThreadCompatible
   public AnalysisResult update(
       LoadingResult loadingResult,
@@ -425,8 +411,7 @@ public class BuildView {
       Options viewOptions,
       TopLevelArtifactContext topLevelOptions,
       EventHandler eventHandler,
-      EventBus eventBus,
-      boolean loadingEnabled)
+      EventBus eventBus)
       throws ViewCreationFailedException, InterruptedException {
     LOG.info("Starting analysis");
     pollInterruptedStatus();
@@ -492,7 +477,6 @@ public class BuildView {
       }
     }
 
-    prepareToBuild(configurations, new SkyframePackageRootResolver(skyframeExecutor, eventHandler));
     skyframeExecutor.injectWorkspaceStatusData();
     SkyframeAnalysisResult skyframeAnalysisResult;
     try {
@@ -744,92 +728,6 @@ public class BuildView {
    */
   public void clearAnalysisCache(Collection<ConfiguredTarget> topLevelTargets) {
     skyframeBuildView.clearAnalysisCache(topLevelTargets);
-  }
-
-  // For ide_build_info
-  public ConfiguredTarget getConfiguredTargetForIdeInfo(
-      EventHandler eventHandler, Label label, BuildConfiguration configuration) {
-    return Iterables.getFirst(
-        skyframeExecutor.getConfiguredTargets(
-            eventHandler,
-            configuration,
-            ImmutableList.of(
-                configuration != null
-                    ? Dependency.withConfiguration(label, configuration)
-                    : Dependency.withNullConfiguration(label)),
-            true),
-        null);
-  }
-
-  public ConfiguredTarget getConfiguredTargetForIdeInfo(
-      EventHandler eventHandler, Target target, BuildConfiguration config) {
-    return getConfiguredTargetForIdeInfo(eventHandler, target.getLabel(), config);
-  }
-
-  public Iterable<ConfiguredTarget> getDirectPrerequisitesForIdeInfo(
-      EventHandler eventHandler, ConfiguredTarget ct, BuildConfigurationCollection configurations)
-          throws InterruptedException {
-    return skyframeExecutor.getConfiguredTargets(
-        eventHandler, ct.getConfiguration(),
-        getDirectPrerequisiteDependenciesForIdeInfo(eventHandler, ct, null, configurations),
-        false);
-  }
-
-  @VisibleForTesting
-  public Iterable<Dependency> getDirectPrerequisiteDependenciesForIdeInfo(
-      final EventHandler eventHandler, ConfiguredTarget ct,
-      @Nullable final LoadingCache<Label, Target> targetCache,
-      BuildConfigurationCollection configurations) throws InterruptedException {
-    if (!(ct.getTarget() instanceof Rule)) {
-      return ImmutableList.of();
-    }
-
-    class SilentDependencyResolver extends DependencyResolver {
-      @Override
-      protected void invalidVisibilityReferenceHook(TargetAndConfiguration node, Label label) {
-        // The error must have been reported already during analysis.
-      }
-
-      @Override
-      protected void invalidPackageGroupReferenceHook(TargetAndConfiguration node, Label label) {
-        // The error must have been reported already during analysis.
-      }
-
-      @Override
-      protected void missingEdgeHook(Target from, Label to, NoSuchThingException e) {
-        // The error must have been reported already during analysis.
-      }
-
-      @Override
-      protected Target getTarget(Target from, Label label, NestedSetBuilder<Label> rootCauses) {
-        if (targetCache == null) {
-          try {
-            return LoadedPackageProvider.getLoadedTarget(
-                skyframeExecutor.getPackageManager(), eventHandler, label);
-          } catch (NoSuchThingException e) {
-            throw new IllegalStateException(e);
-          }
-        }
-
-        try {
-          return targetCache.get(label);
-        } catch (ExecutionException e) {
-          // All lookups should succeed because we should not be looking up any targets in error.
-          throw new IllegalStateException(e);
-        }
-      }
-    }
-
-    DependencyResolver dependencyResolver = new SilentDependencyResolver();
-    TargetAndConfiguration ctgNode =
-        new TargetAndConfiguration(ct.getTarget(), ct.getConfiguration());
-    try {
-      return ImmutableSet.copyOf(dependencyResolver.dependentNodeMap(
-          ctgNode, configurations.getHostConfiguration(), /*aspect=*/ null,
-          getConfigurableAttributeKeysForTesting(eventHandler, ctgNode)).values());
-    } catch (EvalException e) {
-      throw new IllegalStateException(e);
-    }
   }
 
   // For testing

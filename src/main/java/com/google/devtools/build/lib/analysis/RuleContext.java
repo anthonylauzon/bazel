@@ -14,8 +14,10 @@
 
 package com.google.devtools.build.lib.analysis;
 
+import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Joiner;
 import com.google.common.base.Predicate;
+import com.google.common.base.Predicates;
 import com.google.common.collect.ImmutableCollection;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableListMultimap;
@@ -87,6 +89,11 @@ import javax.annotation.Nullable;
  * A helper class for rule implementations building and initialization. Objects of this
  * class are intended to be passed to the builder for the configured target, which then creates the
  * configured target.
+ *
+ * <p>These objects should not outlast the analysis phase. Do not pass them to {@link Action}
+ * objects or other persistent objects. There are internal tests to ensure that RuleContext objects
+ * are not persisted that check the name of this class, so update those tests if you change this
+ * class's name.
  */
 public final class RuleContext extends TargetContext
     implements ActionConstructionContext, ActionRegistry, RuleErrorConsumer {
@@ -129,7 +136,7 @@ public final class RuleContext extends TargetContext
     }
   }
 
-  static final String HOST_CONFIGURATION_PROGRESS_TAG = "for host";
+  private static final String HOST_CONFIGURATION_PROGRESS_TAG = "for host";
 
   private final Rule rule;
   private final ListMultimap<String, ConfiguredTarget> targetMap;
@@ -151,6 +158,7 @@ public final class RuleContext extends TargetContext
 
   private RuleContext(
       Builder builder,
+      AttributeMap attributes,
       ListMultimap<String, ConfiguredTarget> targetMap,
       ListMultimap<String, ConfiguredFilesetEntry> filesetEntryMap,
       Set<ConfigMatchingProvider> configConditions,
@@ -165,8 +173,7 @@ public final class RuleContext extends TargetContext
     this.targetMap = targetMap;
     this.filesetEntryMap = filesetEntryMap;
     this.configConditions = configConditions;
-    this.attributes =
-        ConfiguredAttributeMapper.of(builder.rule, configConditions);
+    this.attributes = attributes;
     this.features = getEnabledFeatures();
     this.ruleClassNameForLogging = ruleClassNameForLogging;
     this.aspectAttributes = aspectAttributes;
@@ -285,7 +292,7 @@ public final class RuleContext extends TargetContext
   @Override
   public ActionOwner getActionOwner() {
     if (actionOwner == null) {
-      actionOwner = new RuleActionOwner(rule, getConfiguration());
+      actionOwner = createActionOwner(rule, getConfiguration());
     }
     return actionOwner;
   }
@@ -360,55 +367,15 @@ public final class RuleContext extends TargetContext
     return getAnalysisEnvironment().getBuildInfo(this, key);
   }
 
-  // TODO(bazel-team): This class could be simpler if Rule and BuildConfiguration classes
-  // were immutable. Then we would need to store only references those two.
-  @Immutable
-  private static final class RuleActionOwner implements ActionOwner {
-    private final Label label;
-    private final Location location;
-    private final String mnemonic;
-    private final String targetKind;
-    private final String configurationChecksum;
-    private final boolean hostConfiguration;
-
-    private RuleActionOwner(Rule rule, BuildConfiguration configuration) {
-      this.label = rule.getLabel();
-      this.location = rule.getLocation();
-      this.targetKind = rule.getTargetKind();
-      this.mnemonic = configuration.getMnemonic();
-      this.configurationChecksum = configuration.checksum();
-      this.hostConfiguration = configuration.isHostConfiguration();
-    }
-
-    @Override
-    public Location getLocation() {
-      return location;
-    }
-
-    @Override
-    public Label getLabel() {
-      return label;
-    }
-
-    @Override
-    public String getConfigurationMnemonic() {
-      return mnemonic;
-    }
-
-    @Override
-    public String getConfigurationChecksum() {
-      return configurationChecksum;
-    }
-
-    @Override
-    public String getTargetKind() {
-      return targetKind;
-    }
-
-    @Override
-    public String getAdditionalProgressInfo() {
-      return hostConfiguration ? HOST_CONFIGURATION_PROGRESS_TAG : null;
-    }
+  @VisibleForTesting
+  public static ActionOwner createActionOwner(Rule rule, BuildConfiguration configuration) {
+    return new ActionOwner(
+        rule.getLabel(),
+        rule.getLocation(),
+        configuration.getMnemonic(),
+        rule.getTargetKind(),
+        configuration.checksum(),
+        configuration.isHostConfiguration() ? HOST_CONFIGURATION_PROGRESS_TAG : null);
   }
 
   @Override
@@ -721,6 +688,29 @@ public final class RuleContext extends TargetContext
   }
 
   /**
+   * For a given attribute, returns all {@link TransitiveInfoProvider}s provided by targets
+   * of that attribute. Each {@link TransitiveInfoProvider} is keyed by the
+   * {@link BuildConfiguration} under which the provider was created.
+   */
+  public <C extends TransitiveInfoProvider> ImmutableListMultimap<BuildConfiguration, C>
+      getPrerequisitesByConfiguration(String attributeName, Mode mode, final Class<C> classType) {
+    AnalysisUtils.checkProvider(classType);
+    List<? extends TransitiveInfoCollection> transitiveInfoCollections =
+        getPrerequisites(attributeName, mode);
+    
+    // Use an ImmutableListMultimap.Builder here to preserve ordering.
+    ImmutableListMultimap.Builder<BuildConfiguration, C> result =
+        ImmutableListMultimap.builder();
+    for (TransitiveInfoCollection prerequisite : transitiveInfoCollections) {
+      C prerequisiteProvider = prerequisite.getProvider(classType);
+      if (prerequisiteProvider != null) {
+        result.put(prerequisite.getConfiguration(), prerequisiteProvider);
+      }
+    }
+    return result.build();
+  }
+
+  /**
    * Returns all the providers of the specified type that are listed under the specified attribute
    * of this target in the BUILD file.
    */
@@ -753,6 +743,7 @@ public final class RuleContext extends TargetContext
    *
    * @return the {@link FilesToRunProvider} interface of the prerequisite.
    */
+  @Nullable
   public FilesToRunProvider getExecutablePrerequisite(String attributeName, Mode mode) {
     Attribute ruleDefinition = getAttribute(attributeName);
 
@@ -1339,17 +1330,24 @@ public final class RuleContext extends TargetContext
       Preconditions.checkNotNull(prerequisiteMap);
       Preconditions.checkNotNull(configConditions);
       Preconditions.checkNotNull(visibility);
+      AttributeMap attributes = ConfiguredAttributeMapper.of(rule, configConditions);
+      validateAttributes(attributes);
       ListMultimap<String, ConfiguredTarget> targetMap = createTargetMap();
       ListMultimap<String, ConfiguredFilesetEntry> filesetEntryMap =
           createFilesetEntryMap(rule, configConditions);
       return new RuleContext(
           this,
+          attributes,
           targetMap,
           filesetEntryMap,
           configConditions,
           universalFragment,
           getRuleClassNameForLogging(),
           aspectAttributes != null ? aspectAttributes : ImmutableMap.<String, Attribute>of());
+    }
+
+    private void validateAttributes(AttributeMap attributes) {
+      rule.getRuleClassObject().checkAttributesNonEmpty(rule, reporter, attributes);
     }
 
     Builder setVisibility(NestedSet<PackageSpecification> visibility) {
@@ -1557,16 +1555,10 @@ public final class RuleContext extends TargetContext
         }
       }
 
-      if (attribute.isStrictLabelCheckingEnabled()) {
-        if (prerequisiteTarget instanceof Rule) {
-          RuleClass ruleClass = ((Rule) prerequisiteTarget).getRuleClassObject();
-          if (!attribute.getAllowedRuleClassesPredicate().apply(ruleClass)) {
-            boolean allowedWithWarning = attribute.getAllowedRuleClassesWarningPredicate()
-                .apply(ruleClass);
-            reportBadPrerequisite(attribute, prerequisiteTarget.getTargetKind(), prerequisiteLabel,
-                "expected " + attribute.getAllowedRuleClassesPredicate(), allowedWithWarning);
-          }
-        } else if (prerequisiteTarget instanceof FileTarget) {
+      if (prerequisiteTarget instanceof Rule) {
+        validateRuleDependency(prerequisite, attribute);
+      } else if (prerequisiteTarget instanceof FileTarget) {
+        if (attribute.isStrictLabelCheckingEnabled()) {
           if (!attribute.getAllowedFileTypesPredicate()
               .apply(((FileTarget) prerequisiteTarget).getFilename())) {
             if (prerequisiteTarget instanceof InputFile
@@ -1660,10 +1652,10 @@ public final class RuleContext extends TargetContext
       }
     }
 
-    private void validateMandatoryProviders(ConfiguredTarget prerequisite, Attribute attribute) {
+    private String getMissingMandatoryProviders(ConfiguredTarget prerequisite, Attribute attribute){
       List<ImmutableSet<String>> mandatoryProvidersList = attribute.getMandatoryProvidersList();
       if (mandatoryProvidersList.isEmpty()) {
-        return;
+        return null;
       }
       List<List<String>> missingProvidersList = new ArrayList<>();
       for (ImmutableSet<String> providers : mandatoryProvidersList) {
@@ -1674,7 +1666,7 @@ public final class RuleContext extends TargetContext
           }
         }
         if (missing.isEmpty()) {
-          return;
+          return null;
         } else {
           missingProvidersList.add(missing);
         }
@@ -1691,16 +1683,55 @@ public final class RuleContext extends TargetContext
         missingProviders.append("'")
                         .append((providers.size() > 1) ? "]" : "");
       }
-      attributeError(
-          attribute.getName(),
-          "'" + prerequisite.getLabel() + "' does not have mandatory provider "
-                  + missingProviders);
+      return missingProviders.toString();
+    }
+
+    /**
+     * Because some rules still have to use allowedRuleClasses to do rule dependency validation.
+     * We implemented the allowedRuleClasses OR mandatoryProvidersList mechanism. Either condition
+     * is satisfied, we consider the dependency valid.
+     */
+    private void validateRuleDependency(ConfiguredTarget prerequisite, Attribute attribute) {
+      Target prerequisiteTarget = prerequisite.getTarget();
+      Label prerequisiteLabel = prerequisiteTarget.getLabel();
+      RuleClass ruleClass = ((Rule) prerequisiteTarget).getRuleClassObject();
+      Boolean allowed = null;
+      Boolean allowedWithWarning = null;
+
+      if (attribute.getAllowedRuleClassesPredicate() != Predicates.<RuleClass>alwaysTrue()) {
+        allowed = attribute.getAllowedRuleClassesPredicate().apply(ruleClass);
+        if (allowed) {
+          return;
+        }
+      }
+
+      if (attribute.getAllowedRuleClassesWarningPredicate()
+          != Predicates.<RuleClass>alwaysTrue()) {
+        allowedWithWarning = attribute.getAllowedRuleClassesWarningPredicate().apply(ruleClass);
+        if (allowedWithWarning) {
+          reportBadPrerequisite(attribute, prerequisiteTarget.getTargetKind(), prerequisiteLabel,
+              "expected " + attribute.getAllowedRuleClassesPredicate(), true);
+          return;
+        }
+      }
+
+      if (!attribute.getMandatoryProvidersList().isEmpty()) {
+        String missingMandatoryProviders = getMissingMandatoryProviders(prerequisite, attribute);
+        if (missingMandatoryProviders != null) {
+          attributeError(
+              attribute.getName(),
+              "'" + prerequisite.getLabel() + "' does not have mandatory provider "
+                  + missingMandatoryProviders);
+        }
+      } else if (Boolean.FALSE.equals(allowed)) {
+        reportBadPrerequisite(attribute, prerequisiteTarget.getTargetKind(), prerequisiteLabel,
+            "expected " + attribute.getAllowedRuleClassesPredicate(), false);
+      }
     }
 
     private void validateDirectPrerequisite(Attribute attribute, ConfiguredTarget prerequisite) {
       validateDirectPrerequisiteType(prerequisite, attribute);
       validateDirectPrerequisiteFileTypes(prerequisite, attribute);
-      validateMandatoryProviders(prerequisite, attribute);
       if (attribute.performPrereqValidatorCheck()) {
         prerequisiteValidator.validate(this, prerequisite, attribute);
       }

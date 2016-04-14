@@ -51,6 +51,7 @@ import com.google.devtools.build.lib.skyframe.SkyValueDirtinessChecker;
 import com.google.devtools.build.lib.skyframe.SkyframeExecutor;
 import com.google.devtools.build.lib.testutil.ManualClock;
 import com.google.devtools.build.lib.testutil.MoreAsserts;
+import com.google.devtools.build.lib.testutil.TestConstants;
 import com.google.devtools.build.lib.testutil.TestRuleClassProvider;
 import com.google.devtools.build.lib.util.Preconditions;
 import com.google.devtools.build.lib.util.io.TimestampGranularityMonitor;
@@ -558,9 +559,12 @@ public class LoadingPhaseRunnerTest {
         "cc_library(name = 'hello', srcs = ['hello.cc', '//bad:bad.cc'])");
     tester.useLoadingOptions("--compile_one_dependency");
     try {
-      tester.load("base/hello.cc");
-      fail();
-    } catch (TargetParsingException expected) {
+      LoadingResult loadingResult = tester.load("base/hello.cc");
+      if (runsLoadingPhase()) {
+        fail();
+      }
+      assertThat(loadingResult.hasLoadingError()).isFalse();
+    } catch (LoadingFailedException expected) {
       tester.assertContainsError("no such package 'bad'");
     }
   }
@@ -570,23 +574,8 @@ public class LoadingPhaseRunnerTest {
     tester.addFile("base/BUILD",
         "cc_library(name = 'hello', srcs = ['hello.cc', '//bad:bad.cc'])");
     tester.useLoadingOptions("--compile_one_dependency");
-    if (runsLoadingPhase()) {
-      // The LegacyLoadingPhaseRunner throws an exception if it can't load any of the sources in the
-      // same rule as the source we're looking for even with --keep_going.
-      // In general, we probably want --compile_one_dependency to be compatible with --keep_going
-      // for consistency, but it's unclear if this is actually a problem for anyone. The most common
-      // use case for compile_one_dependency is to iterate quickly on a single file, without
-      // --keep_going.
-      try {
-        tester.load("base/hello.cc");
-        fail();
-      } catch (TargetParsingException expected) {
-        tester.assertContainsError("no such package 'bad'");
-      }
-    } else {
-      LoadingResult loadingResult = tester.loadKeepGoing("base/hello.cc");
-      assertThat(loadingResult.hasTargetPatternError()).isTrue();
-    }
+    LoadingResult loadingResult = tester.loadKeepGoing("base/hello.cc");
+    assertEquals(loadingResult.hasLoadingError(), runsLoadingPhase());
   }
 
   private void assertCircularSymlinksDuringTargetParsing(String targetPattern) throws Exception {
@@ -642,7 +631,6 @@ public class LoadingPhaseRunnerTest {
       BlazeDirectories directories =
           new BlazeDirectories(fs.getPath("/install"), fs.getPath("/output"), workspace);
       skyframeExecutor = SequencedSkyframeExecutor.create(pkgFactory,
-          new TimestampGranularityMonitor(clock),
           directories,
           null,  /* binTools -- not used */
           null,  /* workspaceStatusActionFactory -- not used */
@@ -655,10 +643,15 @@ public class LoadingPhaseRunnerTest {
           ImmutableList.<SkyValueDirtinessChecker>of());
       PathPackageLocator pkgLocator = PathPackageLocator.create(
           null, options.packagePath, storedErrors, workspace, workspace);
-      skyframeExecutor.preparePackageLoading(pkgLocator,
-          ConstantRuleVisibility.PRIVATE, true,
-          7, TestRuleClassProvider.getRuleClassProvider().getDefaultsPackageContent(),
-          UUID.randomUUID());
+      skyframeExecutor.preparePackageLoading(
+          pkgLocator,
+          ConstantRuleVisibility.PRIVATE,
+          true,
+          7,
+          TestRuleClassProvider.getRuleClassProvider()
+              .getDefaultsPackageContent(TestConstants.TEST_INVOCATION_POLICY),
+          UUID.randomUUID(),
+          new TimestampGranularityMonitor(clock));
       loadingPhaseRunner = skyframeExecutor.getLoadingPhaseRunner(
           pkgFactory.getRuleClassNames(), useNewImpl);
       this.options = Options.getDefaults(LoadingOptions.class);
@@ -736,7 +729,9 @@ public class LoadingPhaseRunnerTest {
     }
 
     private void sync() throws InterruptedException {
-      String pkgContents = TestRuleClassProvider.getRuleClassProvider().getDefaultsPackageContent();
+      String pkgContents =
+          TestRuleClassProvider.getRuleClassProvider()
+              .getDefaultsPackageContent(TestConstants.TEST_INVOCATION_POLICY);
       skyframeExecutor.setupDefaultPackage(pkgContents);
       clock.advanceMillis(1);
       ModifiedFileSet.Builder builder = ModifiedFileSet.builder();

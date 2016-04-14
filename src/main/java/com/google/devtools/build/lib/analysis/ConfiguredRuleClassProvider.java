@@ -41,6 +41,7 @@ import com.google.devtools.build.lib.packages.RuleClass;
 import com.google.devtools.build.lib.packages.RuleClassProvider;
 import com.google.devtools.build.lib.rules.RuleConfiguredTargetFactory;
 import com.google.devtools.build.lib.rules.SkylarkModules;
+import com.google.devtools.build.lib.runtime.proto.InvocationPolicyOuterClass.InvocationPolicy;
 import com.google.devtools.build.lib.syntax.Environment;
 import com.google.devtools.build.lib.syntax.Environment.Extension;
 import com.google.devtools.build.lib.syntax.Mutability;
@@ -82,7 +83,8 @@ public class ConfiguredRuleClassProvider implements RuleClassProvider {
    * Builder for {@link ConfiguredRuleClassProvider}.
    */
   public static class Builder implements RuleDefinitionEnvironment {
-    private final StringBuilder defaultWorkspaceFile = new StringBuilder();
+    private final StringBuilder defaultWorkspaceFilePrefix = new StringBuilder();
+    private final StringBuilder defaultWorkspaceFileSuffix = new StringBuilder();
     private Label preludeLabel;
     private String runfilesPrefix;
     private String toolsRepository;
@@ -108,8 +110,12 @@ public class ConfiguredRuleClassProvider implements RuleClassProvider {
         ImmutableList.<Class<?>>builder().addAll(SkylarkModules.MODULES);
     private final List<Class<? extends FragmentOptions>> buildOptions = Lists.newArrayList();
 
-    public void addWorkspaceFile(String contents) {
-      defaultWorkspaceFile.append(contents);
+    public void addWorkspaceFilePrefix(String contents) {
+      defaultWorkspaceFilePrefix.append(contents);
+    }
+
+    public void addWorkspaceFileSuffix(String contents) {
+      defaultWorkspaceFileSuffix.append(contents);
     }
 
     public Builder setPrelude(String preludeLabelString) {
@@ -263,7 +269,8 @@ public class ConfiguredRuleClassProvider implements RuleClassProvider {
           ImmutableMap.copyOf(ruleClassMap),
           ImmutableMap.copyOf(ruleDefinitionMap),
           ImmutableMap.copyOf(aspectFactoryMap),
-          defaultWorkspaceFile.toString(),
+          defaultWorkspaceFilePrefix.toString(),
+          defaultWorkspaceFileSuffix.toString(),
           ImmutableList.copyOf(buildInfoFactories),
           ImmutableList.copyOf(configurationOptions),
           ImmutableList.copyOf(configurationFragments),
@@ -303,10 +310,15 @@ public class ConfiguredRuleClassProvider implements RuleClassProvider {
   });
 
   /**
-   * A list of relative paths to the WORKSPACE files needed to provide external dependencies for
-   * the rule classes.
+   * Default content that should be added at the beginning of the WORKSPACE file.
    */
-  String defaultWorkspaceFile;
+  private final String defaultWorkspaceFilePrefix;
+
+  /**
+   * Default content that should be added at the end of the WORKSPACE file.
+   */
+  private final String defaultWorkspaceFileSuffix;
+
 
   /**
    * Label for the prelude file.
@@ -374,7 +386,8 @@ public class ConfiguredRuleClassProvider implements RuleClassProvider {
       ImmutableMap<String, RuleClass> ruleClassMap,
       ImmutableMap<String, Class<? extends RuleDefinition>> ruleDefinitionMap,
       ImmutableMap<String, Class<? extends NativeAspectFactory>> aspectFactoryMap,
-      String defaultWorkspaceFile,
+      String defaultWorkspaceFilePrefix,
+      String defaultWorkspaceFileSuffix,
       ImmutableList<BuildInfoFactory> buildInfoFactories,
       ImmutableList<Class<? extends FragmentOptions>> configurationOptions,
       ImmutableList<ConfigurationFragmentFactory> configurationFragments,
@@ -390,7 +403,8 @@ public class ConfiguredRuleClassProvider implements RuleClassProvider {
     this.ruleClassMap = ruleClassMap;
     this.ruleDefinitionMap = ruleDefinitionMap;
     this.aspectFactoryMap = aspectFactoryMap;
-    this.defaultWorkspaceFile = defaultWorkspaceFile;
+    this.defaultWorkspaceFilePrefix = defaultWorkspaceFilePrefix;
+    this.defaultWorkspaceFileSuffix = defaultWorkspaceFileSuffix;
     this.buildInfoFactories = buildInfoFactories;
     this.configurationOptions = configurationOptions;
     this.configurationFragments = configurationFragments;
@@ -476,8 +490,8 @@ public class ConfiguredRuleClassProvider implements RuleClassProvider {
   /**
    * Returns the defaults package for the default settings.
    */
-  public String getDefaultsPackageContent() {
-    return DefaultsPackage.getDefaultsPackageContent(configurationOptions);
+  public String getDefaultsPackageContent(InvocationPolicy invocationPolicy) {
+    return DefaultsPackage.getDefaultsPackageContent(configurationOptions, invocationPolicy);
   }
 
   /**
@@ -518,7 +532,7 @@ public class ConfiguredRuleClassProvider implements RuleClassProvider {
       EventHandler eventHandler,
       String astFileContentHashCode,
       Map<String, Extension> importMap) {
-    Environment env = Environment.builder(mutability)
+    return Environment.builder(mutability)
         .setSkylark()
         .setGlobals(globals)
         .setEventHandler(eventHandler)
@@ -526,22 +540,26 @@ public class ConfiguredRuleClassProvider implements RuleClassProvider {
         .setImportedExtensions(importMap)
         .setLoadingPhase()
         .build();
-    return env;
   }
 
   @Override
   public Environment createSkylarkRuleClassEnvironment(
-      Mutability mutability,
+      Label extensionLabel, Mutability mutability,
       EventHandler eventHandler,
       String astFileContentHashCode,
       Map<String, Extension> importMap) {
     return createSkylarkRuleClassEnvironment(
-        mutability, globals, eventHandler, astFileContentHashCode, importMap);
+        mutability, globals.setLabel(extensionLabel),
+        eventHandler, astFileContentHashCode, importMap);
   }
 
+  @Override
+  public String getDefaultWorkspacePrefix() {
+    return defaultWorkspaceFilePrefix;
+  }
 
   @Override
-  public String getDefaultWorkspaceFile() {
-    return defaultWorkspaceFile;
+  public String getDefaultWorkspaceSuffix() {
+    return defaultWorkspaceFileSuffix;
   }
 }

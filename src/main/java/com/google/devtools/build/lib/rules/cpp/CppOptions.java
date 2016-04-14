@@ -18,9 +18,7 @@ import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Multimap;
-import com.google.devtools.build.lib.Constants;
 import com.google.devtools.build.lib.analysis.config.BuildConfiguration;
-import com.google.devtools.build.lib.analysis.config.BuildConfiguration.DefaultLabelConverter;
 import com.google.devtools.build.lib.analysis.config.BuildConfiguration.LabelConverter;
 import com.google.devtools.build.lib.analysis.config.CompilationMode;
 import com.google.devtools.build.lib.analysis.config.FragmentOptions;
@@ -47,12 +45,6 @@ import java.util.Set;
  * Command-line options for C++.
  */
 public class CppOptions extends FragmentOptions {
-  /** Custom converter for {@code --crosstool_top}. */
-  public static class CrosstoolTopConverter extends DefaultLabelConverter {
-    public CrosstoolTopConverter() {
-      super(Constants.TOOLS_REPOSITORY + "//tools/cpp:toolchain");
-    }
-  }
 
   /**
    * Converter for --cwarn flag
@@ -169,9 +161,9 @@ public class CppOptions extends FragmentOptions {
 
   @Option(
     name = "crosstool_top",
-    defaultValue = "",
+    defaultValue = "@bazel_tools//tools/cpp:toolchain",
     category = "version",
-    converter = CrosstoolTopConverter.class,
+    converter = LabelConverter.class,
     help = "The label of the crosstool package to be used for compiling C++ code."
   )
   public Label crosstoolTop;
@@ -290,6 +282,21 @@ public class CppOptions extends FragmentOptions {
             + "NOTE: use of this flag REQUIRES --distinct_host_configuration."
   )
   public boolean skipStaticOutputs;
+
+  // Add all sources of transitively found modules. Although they are also embedded in the .pcm
+  // files, Clang currently verifies that all files specified in a cppmap do exist.
+  // TODO(djasper): Once Clang's r264664 is released, the default can be flipped and this option
+  // can be removed.
+  @Option(
+    name = "send_transitive_header_module_srcs",
+    defaultValue = "true",
+    category = "semantics",
+    help =
+        "This flag is only used for a transition and will go away. "
+            + "If true, treat all headers mentioned in transitive .cppmap files as mandatory "
+            + "inputs."
+  )
+  public boolean sendTransitiveHeaderModuleSrcs;
 
   @Option(
     name = "process_headers_in_dependencies",
@@ -643,6 +650,12 @@ public class CppOptions extends FragmentOptions {
 
     if (libcTop != null) {
       Label libcLabel = libcTop.getLabel();
+      if (libcLabel != null) {
+        labelMap.put("crosstool", libcLabel);
+      }
+    }
+    if (hostLibcTop != null) {
+      Label libcLabel = hostLibcTop.getLabel();
       if (libcLabel != null) {
         labelMap.put("crosstool", libcLabel);
       }

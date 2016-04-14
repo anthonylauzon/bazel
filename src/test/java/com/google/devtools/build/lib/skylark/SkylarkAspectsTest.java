@@ -15,7 +15,6 @@ package com.google.devtools.build.lib.skylark;
 
 import static com.google.common.collect.Iterables.transform;
 import static com.google.common.truth.Truth.assertThat;
-import static com.google.common.truth.Truth.assertWithMessage;
 import static org.junit.Assert.fail;
 
 import com.google.common.base.Function;
@@ -35,12 +34,13 @@ import com.google.devtools.build.lib.packages.Attribute.ConfigurationTransition;
 import com.google.devtools.build.lib.rules.cpp.CppConfiguration;
 import com.google.devtools.build.lib.rules.java.Jvm;
 import com.google.devtools.build.lib.skyframe.AspectValue;
-import com.google.devtools.build.lib.skyframe.AspectValue.AspectKey;
 import com.google.devtools.build.lib.syntax.SkylarkNestedSet;
 
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.junit.runners.JUnit4;
+
+import java.util.Arrays;
 
 import javax.annotation.Nullable;
 
@@ -105,8 +105,7 @@ public class SkylarkAspectsTest extends AnalysisTestCase {
     AnalysisResult analysisResult =
         update(ImmutableList.of("test/aspect.bzl%MyAspect"), "//test:xxx");
     AspectValue aspectValue = Iterables.getOnlyElement(analysisResult.getAspects());
-    AspectKey aspectKey = aspectValue.getKey();
-    AspectDefinition aspectDefinition = aspectKey.getAspect().getDefinition();
+    AspectDefinition aspectDefinition = aspectValue.getAspect().getDefinition();
     assertThat(
         aspectDefinition.getConfigurationFragmentPolicy()
             .isLegalConfigurationFragment(Jvm.class, ConfigurationTransition.NONE))
@@ -532,54 +531,6 @@ public class SkylarkAspectsTest extends AnalysisTestCase {
   }
 
   @Test
-  public void aspectOutputsToBinDirectory() throws Exception {
-    scratch.file("foo/extension.bzl",
-        "def _aspect_impl(target, ctx):",
-        "   file = ctx.new_file('aspect-output-' + target.label.name)",
-        "   ctx.file_action(file, 'data')",
-        "   return struct(aspect_file = file)",
-        "my_aspect = aspect(_aspect_impl)",
-        "def _rule_impl(ctx):",
-        "   pass",
-        "rule_bin_out = rule(_rule_impl, output_to_genfiles=False)",
-        "rule_gen_out = rule(_rule_impl, output_to_genfiles=True)",
-        "def _main_rule_impl(ctx):",
-        "   s = set()",
-        "   for d in ctx.attr.deps:",
-        "       s = s | set([d.aspect_file])",
-        "   return struct(aspect_files = s)",
-        "main_rule = rule(_main_rule_impl,",
-        "   attrs = { 'deps' : attr.label_list(aspects = [my_aspect]) },",
-        ")"
-    );
-
-    scratch.file("foo/BUILD",
-        "load('extension', 'rule_bin_out', 'rule_gen_out', 'main_rule')",
-        "rule_bin_out(name = 'rbin')",
-        "rule_gen_out(name = 'rgen')",
-        "main_rule(name = 'main', deps = [':rbin', ':rgen'])"
-    );
-    AnalysisResult analysisResult = update(ImmutableList.<String>of(), "//foo:main");
-    ConfiguredTarget target = analysisResult.getTargetsToBuild().iterator().next();
-    NestedSet<Artifact> aspectFiles =
-        ((SkylarkNestedSet) target.getProvider(SkylarkProviders.class).getValue("aspect_files"))
-            .getSet(Artifact.class);
-    assertThat(transform(aspectFiles, new Function<Artifact, String>() {
-      @Override
-      public String apply(Artifact artifact) {
-        return artifact.getFilename();
-      }
-    })).containsExactly("aspect-output-rbin", "aspect-output-rgen");
-    for (Artifact aspectFile : aspectFiles) {
-      String rootPath = aspectFile.getRoot().getExecPath().toString();
-      assertWithMessage("Artifact %s should not be in genfiles", aspectFile)
-          .that(rootPath).doesNotContain("genfiles");
-      assertWithMessage("Artifact %s should be in bin", aspectFile)
-          .that(rootPath).endsWith("bin");
-    }
-  }
-
-  @Test
   public void multipleExecutablesInTarget() throws Exception {
     scratch.file("foo/extension.bzl",
         "def _aspect_impl(target, ctx):",
@@ -723,6 +674,78 @@ public class SkylarkAspectsTest extends AnalysisTestCase {
 
     return getConfiguredTarget("//test:xxx");
   }
+
+  @Test
+  public void invalidateAspectOnBzlFileChange() throws Exception {
+    scratch.file("test/build_defs.bzl", aspectBzlFile("'deps'"));
+    scratch.file(
+        "test/BUILD",
+        "load('build_defs', 'repro', 'repro_no_aspect')",
+        "repro_no_aspect(name = 'r0')",
+        "repro_no_aspect(name = 'r1', deps = [':r0'])",
+        "repro(name = 'r2', deps = [':r1'])");
+    buildTargetAndCheckRuleInfo("//test:r0", "//test:r1");
+
+    // Make aspect propagation list empty.
+    scratch.overwriteFile("test/build_defs.bzl", aspectBzlFile(""));
+
+    // The aspect should not propagate to //test:r0 anymore.
+    buildTargetAndCheckRuleInfo("//test:r1");
+  }
+
+  private void buildTargetAndCheckRuleInfo(String... expectedLabels) throws Exception {
+    AnalysisResult result = update(ImmutableList.<String>of(), "//test:r2");
+    ConfiguredTarget configuredTarget = result.getTargetsToBuild().iterator().next();
+    SkylarkNestedSet ruleInfoValue =
+        (SkylarkNestedSet)
+            configuredTarget.getProvider(SkylarkProviders.class).getValue("rule_info");
+    assertThat(ruleInfoValue.getSet(String.class))
+        .containsExactlyElementsIn(Arrays.asList(expectedLabels));
+  }
+
+  private String[] aspectBzlFile(String attrAspects) {
+    return new String[] {
+        "def _repro_aspect_impl(target, ctx):",
+        "    s = set([str(target.label)])",
+        "    for d in ctx.rule.attr.deps:",
+        "       if hasattr(d, 'aspect_info'):",
+        "         s = s | d.aspect_info",
+        "    return struct(aspect_info = s)",
+        "",
+        "_repro_aspect = aspect(",
+        "    _repro_aspect_impl,",
+        "    attr_aspects = [" + attrAspects + "],",
+        ")",
+        "",
+        "def repro_impl(ctx):",
+        "    s = set()",
+        "    for d in ctx.attr.deps:",
+        "       if hasattr(d, 'aspect_info'):",
+        "         s = s | d.aspect_info",
+        "    return struct(rule_info = s)",
+        "",
+        "def repro_no_aspect_impl(ctx):",
+        "    pass",
+        "",
+        "repro_no_aspect = rule(implementation = repro_no_aspect_impl,",
+        "             attrs = {",
+        "                       'deps': attr.label_list(",
+        "                             allow_files = True,",
+        "                       )",
+        "                      },",
+        ")",
+        "",
+        "repro = rule(implementation = repro_impl,",
+        "             attrs = {",
+        "                       'deps': attr.label_list(",
+        "                             allow_files = True,",
+        "                             aspects = [_repro_aspect],",
+        "                       )",
+        "                      },",
+        ")"
+    };
+  }
+
 
   @RunWith(JUnit4.class)
   public static final class WithKeepGoing extends SkylarkAspectsTest {

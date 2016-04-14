@@ -28,6 +28,7 @@ import com.google.devtools.build.lib.Constants;
 import com.google.devtools.build.lib.events.Event;
 import com.google.devtools.build.lib.events.EventHandler;
 import com.google.devtools.build.lib.events.Reporter;
+import com.google.devtools.build.lib.flags.InvocationPolicyEnforcer;
 import com.google.devtools.build.lib.util.AbruptExitException;
 import com.google.devtools.build.lib.util.AnsiStrippingOutputStream;
 import com.google.devtools.build.lib.util.ExitCode;
@@ -121,19 +122,19 @@ public class BlazeCommandDispatcher {
    * Only some commands work if cwd != workspaceSuffix in Blaze. In that case, also check if Blaze
    * was called from the output directory and fail if it was.
    */
-  private ExitCode checkCwdInWorkspace(Command commandAnnotation, String commandName,
-      OutErr outErr) {
+  private ExitCode checkCwdInWorkspace(CommandEnvironment env, Command commandAnnotation,
+      String commandName, OutErr outErr) {
     if (!commandAnnotation.mustRunInWorkspace()) {
       return ExitCode.SUCCESS;
     }
 
-    if (!runtime.inWorkspace()) {
-      outErr.printErrLn("The '" + commandName + "' command is only supported from within a "
-          + "workspace.");
+    if (!env.inWorkspace()) {
+      outErr.printErrLn(
+          "The '" + commandName + "' command is only supported from within a workspace.");
       return ExitCode.COMMAND_LINE_ERROR;
     }
 
-    Path workspace = runtime.getWorkspace();
+    Path workspace = env.getWorkspace();
     // TODO(kchodorow): Remove this once spaces are supported.
     if (workspace.getPathString().contains(" ")) {
       outErr.printErrLn(Constants.PRODUCT_NAME + " does not currently work properly from paths "
@@ -142,7 +143,7 @@ public class BlazeCommandDispatcher {
     }
 
     Path doNotBuild = workspace.getParentDirectory().getRelative(
-        BlazeRuntime.DO_NOT_BUILD_FILE_NAME);
+        BlazeWorkspace.DO_NOT_BUILD_FILE_NAME);
 
     if (doNotBuild.exists()) {
       if (!commandAnnotation.canRunInOutputDirectory()) {
@@ -209,17 +210,11 @@ public class BlazeCommandDispatcher {
    */
   int exec(List<String> args, OutErr outErr, long firstContactTime)
       throws ShutdownBlazeServerException {
-    // Record the start time for the profiler and the timestamp granularity monitor. Do not put
-    // anything before this!
+    // Record the start time for the profiler. Do not put anything before this!
     long execStartTimeNanos = runtime.getClock().nanoTime();
 
-    // Record the command's starting time again, for use by
-    // TimestampGranularityMonitor.waitForTimestampGranularity().
-    // This should be done as close as possible to the start of
-    // the command's execution - that's why we do this separately,
-    // rather than in runtime.beforeCommand().
-    runtime.getTimestampGranularityMonitor().setCommandStartTime();
-    CommandEnvironment env = runtime.initCommand();
+    // The initCommand call also records the start time for the timestamp granularity monitor.
+    CommandEnvironment env = runtime.getWorkspace().initCommand();
     // Record the command's starting time for use by the commands themselves.
     env.recordCommandStartTime(firstContactTime);
 
@@ -261,7 +256,7 @@ public class BlazeCommandDispatcher {
     }
 
     try {
-      Path commandLog = getCommandLogPath(runtime.getOutputBase());
+      Path commandLog = getCommandLogPath(env.getOutputBase());
 
       // Unlink old command log from previous build, if present, so scripts
       // reading it don't conflate it with the command log we're about to write.
@@ -274,7 +269,7 @@ public class BlazeCommandDispatcher {
           Level.WARNING, "Unable to delete or open command.log", ioException);
     }
 
-    ExitCode result = checkCwdInWorkspace(commandAnnotation, commandName, outErr);
+    ExitCode result = checkCwdInWorkspace(env, commandAnnotation, commandName, outErr);
     if (result != ExitCode.SUCCESS) {
       return result.getNumericExitCode();
     }
@@ -291,7 +286,11 @@ public class BlazeCommandDispatcher {
           new InvocationPolicyEnforcer(runtime.getInvocationPolicy());
       optionsPolicyEnforcer.enforce(optionsParser, commandName);
       optionsPolicyEnforcer =
-          InvocationPolicyEnforcer.create(getRuntime().getStartupOptionsProvider());
+          InvocationPolicyEnforcer.create(
+              getRuntime()
+                  .getStartupOptionsProvider()
+                  .getOptions(BlazeServerStartupOptions.class)
+                  .invocationPolicy);
       optionsPolicyEnforcer.enforce(optionsParser, commandName);
     } catch (OptionsParsingException e) {
       for (String note : rcfileNotes) {
@@ -320,7 +319,7 @@ public class BlazeCommandDispatcher {
 
     // Do this before an actual crash so we don't have to worry about
     // allocating memory post-crash.
-    String[] crashData = runtime.getCrashData(env);
+    String[] crashData = env.getCrashData();
     int numericExitCode = ExitCode.BLAZE_INTERNAL_ERROR.getNumericExitCode();
     PrintStream savedOut = System.out;
     PrintStream savedErr = System.err;
@@ -338,6 +337,12 @@ public class BlazeCommandDispatcher {
     if (!eventHandlerOptions.useColor()) {
       ansiAllowingHandler = createEventHandler(colorfulOutErr, eventHandlerOptions);
       reporter.registerAnsiAllowingHandler(handler, ansiAllowingHandler);
+      if (ansiAllowingHandler instanceof ExperimentalEventHandler) {
+        env.getEventBus()
+            .register(
+                new PassiveExperimentalEventHandler(
+                    (ExperimentalEventHandler) ansiAllowingHandler));
+      }
     }
 
     try {
@@ -400,7 +405,7 @@ public class BlazeCommandDispatcher {
         reporter.removeHandler(ansiAllowingHandler);
         releaseHandler(ansiAllowingHandler);
       }
-      runtime.getTimestampGranularityMonitor().waitForTimestampGranularity(outErr);
+      env.getTimestampGranularityMonitor().waitForTimestampGranularity(outErr);
     }
   }
 
@@ -487,9 +492,8 @@ public class BlazeCommandDispatcher {
 
   private static List<String> getCommandNamesToParse(Command commandAnnotation) {
     List<String> result = new ArrayList<>();
-    getCommandNamesToParseHelper(commandAnnotation, result);
     result.add("common");
-    // TODO(bazel-team): This statement is a NO-OP: Lists.reverse(result);
+    getCommandNamesToParseHelper(commandAnnotation, result);
     return result;
   }
 
@@ -630,7 +634,7 @@ public class BlazeCommandDispatcher {
     EventHandler eventHandler;
     if (eventOptions.experimentalUi) {
       // The experimental event handler is not to be rate limited.
-      return new ExperimentalEventHandler(outErr, eventOptions);
+      return new ExperimentalEventHandler(outErr, eventOptions, runtime.getClock());
     } else if ((eventOptions.useColor() || eventOptions.useCursorControl())) {
       eventHandler = new FancyTerminalEventHandler(outErr, eventOptions);
     } else {

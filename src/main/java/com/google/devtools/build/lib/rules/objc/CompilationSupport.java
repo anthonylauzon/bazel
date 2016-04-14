@@ -38,10 +38,10 @@ import static com.google.devtools.build.lib.rules.objc.ObjcRuleClasses.DSYMUTIL;
 import static com.google.devtools.build.lib.rules.objc.ObjcRuleClasses.HEADERS;
 import static com.google.devtools.build.lib.rules.objc.ObjcRuleClasses.LIBTOOL;
 import static com.google.devtools.build.lib.rules.objc.ObjcRuleClasses.NON_ARC_SRCS_TYPE;
+import static com.google.devtools.build.lib.rules.objc.ObjcRuleClasses.PRECOMPILED_SRCS_TYPE;
 import static com.google.devtools.build.lib.rules.objc.ObjcRuleClasses.SRCS_TYPE;
 import static com.google.devtools.build.lib.rules.objc.ObjcRuleClasses.STRIP;
 import static com.google.devtools.build.lib.rules.objc.ObjcRuleClasses.SWIFT;
-import static com.google.devtools.build.lib.rules.objc.ObjcRuleClasses.intermediateArtifacts;
 import static java.nio.charset.StandardCharsets.ISO_8859_1;
 
 import com.google.common.annotations.VisibleForTesting;
@@ -52,6 +52,7 @@ import com.google.common.base.Predicates;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Iterables;
+import com.google.common.collect.Lists;
 import com.google.common.collect.Sets;
 import com.google.devtools.build.lib.actions.Action;
 import com.google.devtools.build.lib.actions.Artifact;
@@ -104,6 +105,13 @@ import java.util.Set;
  * <p>Methods on this class can be called in any order without impacting the result.
  */
 public final class CompilationSupport {
+
+  @VisibleForTesting
+  static final String OBJC_MODULE_CACHE_DIR_NAME = "_objc_module_cache";
+  
+  @VisibleForTesting
+  static final String MODULES_CACHE_PATH_WARNING =
+      "setting '-fmodules-cache-path' manually in copts is unsupported";
 
   @VisibleForTesting
   static final String ABSOLUTE_INCLUDES_PATH_FORMAT =
@@ -197,10 +205,13 @@ public final class CompilationSupport {
         .errorsForNonMatching(SRCS_TYPE);
     return new CompilationArtifacts.Builder()
         .addSrcs(srcs.filter(COMPILABLE_SRCS_TYPE).list())
-        .addNonArcSrcs(ruleContext.getPrerequisiteArtifacts("non_arc_srcs", Mode.TARGET)
-            .errorsForNonMatching(NON_ARC_SRCS_TYPE)
-            .list())
+        .addNonArcSrcs(
+            ruleContext
+                .getPrerequisiteArtifacts("non_arc_srcs", Mode.TARGET)
+                .errorsForNonMatching(NON_ARC_SRCS_TYPE)
+                .list())
         .addPrivateHdrs(srcs.filter(HEADERS).list())
+        .addPrecompiledSrcs(srcs.filter(PRECOMPILED_SRCS_TYPE).list())
         .setIntermediateArtifacts(ObjcRuleClasses.intermediateArtifacts(ruleContext))
         .setPchFile(Optional.fromNullable(ruleContext.getPrerequisiteArtifact("pch", Mode.TARGET)))
         .build();
@@ -208,6 +219,7 @@ public final class CompilationSupport {
 
   private final RuleContext ruleContext;
   private final CompilationAttributes attributes;
+  private final IntermediateArtifacts intermediateArtifacts;
 
   /**
    * Creates a new compilation support for the given rule.
@@ -215,6 +227,7 @@ public final class CompilationSupport {
   public CompilationSupport(RuleContext ruleContext) {
     this.ruleContext = ruleContext;
     this.attributes = new CompilationAttributes(ruleContext);
+    this.intermediateArtifacts = ObjcRuleClasses.intermediateArtifacts(ruleContext);
   }
 
   /**
@@ -227,8 +240,6 @@ public final class CompilationSupport {
       throws InterruptedException {
     if (common.getCompilationArtifacts().isPresent()) {
       registerGenerateModuleMapAction(common.getCompilationArtifacts());
-      IntermediateArtifacts intermediateArtifacts =
-          ObjcRuleClasses.intermediateArtifacts(ruleContext);
       Optional<CppModuleMap> moduleMap;
       if (ObjcRuleClasses.objcConfiguration(ruleContext).moduleMapsEnabled()) {
         moduleMap = Optional.of(intermediateArtifacts.moduleMap());
@@ -237,7 +248,6 @@ public final class CompilationSupport {
       }
       registerCompileAndArchiveActions(
           common.getCompilationArtifacts().get(),
-          intermediateArtifacts,
           common.getObjcProvider(),
           moduleMap,
           ruleContext.getConfiguration().isCodeCoverageEnabled(),
@@ -252,7 +262,6 @@ public final class CompilationSupport {
    */
   private void registerCompileAndArchiveActions(
       CompilationArtifacts compilationArtifacts,
-      IntermediateArtifacts intermediateArtifacts,
       ObjcProvider objcProvider,
       Optional<CppModuleMap> moduleMap,
       boolean isCodeCoverageEnabled,
@@ -262,14 +271,13 @@ public final class CompilationSupport {
       Artifact objFile = intermediateArtifacts.objFile(sourceFile);
       objFiles.add(objFile);
       if (ObjcRuleClasses.SWIFT_SOURCES.matches(sourceFile.getFilename())) {
-        registerSwiftCompileAction(sourceFile, objFile, intermediateArtifacts, objcProvider);
+        registerSwiftCompileAction(sourceFile, objFile, objcProvider);
       } else {
         registerCompileAction(
             sourceFile,
             objFile,
             objcProvider,
             moduleMap,
-            intermediateArtifacts,
             compilationArtifacts,
             ImmutableList.of("-fobjc-arc"),
             isCodeCoverageEnabled);
@@ -283,18 +291,19 @@ public final class CompilationSupport {
           objFile,
           objcProvider,
           moduleMap,
-          intermediateArtifacts,
           compilationArtifacts,
           ImmutableList.of("-fno-objc-arc"),
           isCodeCoverageEnabled);
     }
 
+    objFiles.addAll(compilationArtifacts.getPrecompiledSrcs());
+    
     if (compilationArtifacts.hasSwiftSources()) {
-      registerSwiftModuleMergeAction(intermediateArtifacts, compilationArtifacts, objcProvider);
+      registerSwiftModuleMergeAction(compilationArtifacts, objcProvider);
     }
 
     for (Artifact archive : compilationArtifacts.getArchive().asSet()) {
-      registerArchiveActions(intermediateArtifacts, objFiles, archive);
+      registerArchiveActions(objFiles, archive);
     }
 
     if (isFullyLinkEnabled) {
@@ -327,7 +336,6 @@ public final class CompilationSupport {
       Artifact objFile,
       ObjcProvider objcProvider,
       Optional<CppModuleMap> moduleMap,
-      IntermediateArtifacts intermediateArtifacts,
       CompilationArtifacts compilationArtifacts,
       Iterable<String> otherFlags,
       boolean isCodeCoverageEnabled) {
@@ -372,9 +380,7 @@ public final class CompilationSupport {
         .add(otherFlags)
         .addFormatEach("-D%s", objcProvider.get(DEFINE))
         .add(coverageFlags.build())
-        .add(objcConfiguration.getCopts())
-        .add(attributes.copts())
-        .add(attributes.optionsCopts());
+        .add(getCompileRuleCopts());
     PathFragment sourceExecPathFragment = sourceFile.getExecPath();
     String sourcePath = sourceExecPathFragment.getPathString();
     if (!sourceExecPathFragment.isAbsolute() && objcConfiguration.getUseAbsolutePathsForActions()) {
@@ -387,11 +393,15 @@ public final class CompilationSupport {
       .addExecPath("-MF", dotdFile);
 
     if (moduleMap.isPresent()) {
+      // If modules are enabled for the rule, -fmodules is added to the copts already. (This implies
+      // module map usage). Otherwise, we need to pass -fmodule-maps.
+      if (!attributes.enableModules()) {
+        commandLine.add("-fmodule-maps");
+      }
       // -fmodule-map-file only loads the module in Xcode 7, so we add the module maps's directory
       // to the include path instead.
       // TODO(bazel-team): Use -fmodule-map-file when Xcode 6 support is dropped.
       commandLine
-          .add(attributes.enableModules() ? "-fmodules" : "-fmodule-maps")
           .add("-iquote")
           .add(
               moduleMap
@@ -401,15 +411,10 @@ public final class CompilationSupport {
                   .getParentDirectory()
                   .toString())
           .add("-fmodule-name=" + moduleMap.get().getName());
-      if (attributes.enableModules()) {
-        String cachePath =
-            ruleContext.getConfiguration().getGenfilesFragment() + "/_objc_module_cache";
-        commandLine.add("-fmodules-cache-path=" + cachePath);
-      }
     }
 
     // TODO(bazel-team): Remote private headers from inputs once they're added to the provider.
-    ruleContext.registerAction(ObjcRuleClasses.spawnXcrunActionBuilder(ruleContext)
+    ruleContext.registerAction(ObjcRuleClasses.spawnAppleEnvActionBuilder(ruleContext)
         .setMnemonic("ObjcCompile")
         .setExecutable(xcrunwrapper(ruleContext))
         .setCommandLine(commandLine.build())
@@ -427,17 +432,48 @@ public final class CompilationSupport {
   }
 
   /**
+   * Returns the copts for the compile action in the current rule context (using a combination
+   * of the rule's "copts" attribute as well as the current configuration copts).
+   */
+  private Iterable<String> getCompileRuleCopts() {
+    ObjcConfiguration objcConfiguration = ObjcRuleClasses.objcConfiguration(ruleContext);
+    List<String> copts = Lists.newArrayList(
+        Iterables.concat(objcConfiguration.getCopts(), attributes.copts()));
+
+    for (String copt : copts) {
+      if (copt.contains("-fmodules-cache-path")) {
+        // Bazel decides on the cache path location.
+        ruleContext.ruleWarning(MODULES_CACHE_PATH_WARNING);
+      }
+    }
+
+    if (attributes.enableModules()) {
+      copts.add("-fmodules");
+    }
+    if (copts.contains("-fmodules")) {
+      // If modules are enabled, clang caches module information. If unspecified, this is a
+      // system-wide cache directory, which is a problem for remote executors which may run
+      // multiple actions with different source trees that can't share this cache.
+      // We thus set its path to the root of the genfiles directory.
+      // Unfortunately, this cache contains non-hermetic information, thus we avoid declaring it as
+      // an implicit output (as outputs must be hermetic).
+      String cachePath =
+          ruleContext.getConfiguration().getGenfilesFragment() + "/" + OBJC_MODULE_CACHE_DIR_NAME;
+      copts.add("-fmodules-cache-path=" + cachePath);
+    }
+    return copts;
+  }
+
+  /**
    * Compiles a single swift file.
    *
    * @param sourceFile the artifact to compile
    * @param objFile the resulting object artifact
-   * @param intermediateArtifacts intermediary artifacts
    * @param objcProvider ObjcProvider instance for this invocation
    */
   private void registerSwiftCompileAction(
       Artifact sourceFile,
       Artifact objFile,
-      IntermediateArtifacts intermediateArtifacts,
       ObjcProvider objcProvider) {
     ObjcConfiguration objcConfiguration = ObjcRuleClasses.objcConfiguration(ruleContext);
     AppleConfiguration appleConfiguration = ruleContext.getFragment(AppleConfiguration.class);
@@ -506,8 +542,10 @@ public final class CompilationSupport {
       commandLine.add("-import-underlying-module");
     }
 
+    commandLine.add(commonFrameworkFlags(objcProvider, appleConfiguration));
+
     ruleContext.registerAction(
-        ObjcRuleClasses.spawnXcrunActionBuilder(ruleContext)
+        ObjcRuleClasses.spawnAppleEnvActionBuilder(ruleContext)
             .setMnemonic("SwiftCompile")
             .setExecutable(xcrunwrapper(ruleContext))
             .setCommandLine(commandLine.build())
@@ -526,7 +564,6 @@ public final class CompilationSupport {
    * used by Objective-C code.
    */
   private void registerSwiftModuleMergeAction(
-      IntermediateArtifacts intermediateArtifacts,
       CompilationArtifacts compilationArtifacts,
       ObjcProvider objcProvider) {
     ObjcConfiguration objcConfiguration = ObjcRuleClasses.objcConfiguration(ruleContext);
@@ -577,7 +614,9 @@ public final class CompilationSupport {
       commandLine.add("-I").add(moduleMapPath.getParentDirectory().toString());
     }
 
-    ruleContext.registerAction(ObjcRuleClasses.spawnXcrunActionBuilder(ruleContext)
+    commandLine.add(commonFrameworkFlags(objcProvider, appleConfiguration));
+
+    ruleContext.registerAction(ObjcRuleClasses.spawnAppleEnvActionBuilder(ruleContext)
         .setMnemonic("SwiftModuleMerge")
         .setExecutable(xcrunwrapper(ruleContext))
         .setCommandLine(commandLine.build())
@@ -589,8 +628,7 @@ public final class CompilationSupport {
         .build(ruleContext));
   }
 
-  private void registerArchiveActions(IntermediateArtifacts intermediateArtifacts,
-      ImmutableList.Builder<Artifact> objFiles, Artifact archive) {
+  private void registerArchiveActions(ImmutableList.Builder<Artifact> objFiles, Artifact archive) {
     for (Action action : archiveActions(ruleContext, objFiles.build(), archive,
         ruleContext.getFragment(AppleConfiguration.class),
         intermediateArtifacts.objList())) {
@@ -613,7 +651,7 @@ public final class CompilationSupport {
         Artifact.joinExecPaths("\n", objFiles),
         /*makeExecutable=*/ false));
 
-    actions.add(ObjcRuleClasses.spawnXcrunActionBuilder(ruleContext)
+    actions.add(ObjcRuleClasses.spawnAppleEnvActionBuilder(ruleContext)
         .setMnemonic("ObjcLink")
         .setExecutable(xcrunwrapper(ruleContext))
         .setCommandLine(new CustomCommandLine.Builder()
@@ -637,7 +675,7 @@ public final class CompilationSupport {
     Artifact archive = ruleContext.getImplicitOutputArtifact(FULLY_LINKED_LIB);
 
     ImmutableList<Artifact> ccLibraries = ccLibraries(objcProvider);
-    ruleContext.registerAction(ObjcRuleClasses.spawnXcrunActionBuilder(ruleContext)
+    ruleContext.registerAction(ObjcRuleClasses.spawnAppleEnvActionBuilder(ruleContext)
         .setMnemonic("ObjcLink")
         .setExecutable(xcrunwrapper(ruleContext))
         .setCommandLine(new CustomCommandLine.Builder()
@@ -669,7 +707,6 @@ public final class CompilationSupport {
 
     if (common.getCompilationArtifacts().isPresent()) {
       CompilationArtifacts artifacts = common.getCompilationArtifacts().get();
-      IntermediateArtifacts intermediateArtifacts = intermediateArtifacts(ruleContext);
       for (Artifact artifact : Iterables.concat(artifacts.getSrcs(), artifacts.getNonArcSrcs())) {
         oFiles.add(intermediateArtifacts.objFile(artifact));
       }
@@ -697,19 +734,22 @@ public final class CompilationSupport {
    * @param objcProvider common information about this rule's attributes and its dependencies
    * @param extraLinkArgs any additional arguments to pass to the linker
    * @param extraLinkInputs any additional input artifacts to pass to the link action
+   * @param dsymOutputType the file type of the dSYM bundle to be generated
    *
    * @return this compilation support
    */
-  CompilationSupport registerLinkActions(ObjcProvider objcProvider, ExtraLinkArgs extraLinkArgs,
-      Iterable<Artifact> extraLinkInputs) {
-    IntermediateArtifacts intermediateArtifacts =
-        ObjcRuleClasses.intermediateArtifacts(ruleContext);
-    Optional<Artifact> dsymBundle;
+  CompilationSupport registerLinkActions(
+      ObjcProvider objcProvider,
+      ExtraLinkArgs extraLinkArgs,
+      Iterable<Artifact> extraLinkInputs,
+      DsymOutputType dsymOutputType) {
+    Optional<Artifact> dsymBundleZip;
+    Optional<Artifact> linkmap;
     if (ObjcRuleClasses.objcConfiguration(ruleContext).generateDebugSymbols()) {
-      registerDsymActions();
-      dsymBundle = Optional.of(intermediateArtifacts.dsymBundle());
+      registerDsymActions(dsymOutputType);
+      dsymBundleZip = Optional.of(intermediateArtifacts.tempDsymBundleZip(dsymOutputType));
     } else {
-      dsymBundle = Optional.absent();
+      dsymBundleZip = Optional.absent();
     }
 
     Iterable<Artifact> prunedJ2ObjcArchives = ImmutableList.<Artifact>of();
@@ -719,12 +759,19 @@ public final class CompilationSupport {
       prunedJ2ObjcArchives = j2objcPrunedLibraries(objcProvider);
     }
 
+    if (ObjcRuleClasses.objcConfiguration(ruleContext).generateLinkmap()) {
+      linkmap = Optional.of(intermediateArtifacts.linkmap());
+    } else {
+      linkmap = Optional.absent();
+    }
+
     registerLinkAction(
         objcProvider,
         extraLinkArgs,
         extraLinkInputs,
-        dsymBundle,
-        prunedJ2ObjcArchives);
+        dsymBundleZip,
+        prunedJ2ObjcArchives,
+        linkmap);
     return this;
   }
 
@@ -786,12 +833,18 @@ public final class CompilationSupport {
             /*externDependencies=*/ true));
   }
 
-  private void registerLinkAction(ObjcProvider objcProvider, ExtraLinkArgs extraLinkArgs,
-      Iterable<Artifact> extraLinkInputs, Optional<Artifact> dsymBundle,
-      Iterable<Artifact> prunedJ2ObjcArchives) {
+  private boolean isDynamicLib(CommandLine commandLine) {
+    return Iterables.contains(commandLine.arguments(), "-dynamiclib");
+  }
+
+  private void registerLinkAction(
+      ObjcProvider objcProvider,
+      ExtraLinkArgs extraLinkArgs,
+      Iterable<Artifact> extraLinkInputs,
+      Optional<Artifact> dsymBundleZip,
+      Iterable<Artifact> prunedJ2ObjcArchives,
+      Optional<Artifact> linkmap) {
     ObjcConfiguration objcConfiguration = ObjcRuleClasses.objcConfiguration(ruleContext);
-    IntermediateArtifacts intermediateArtifacts =
-        ObjcRuleClasses.intermediateArtifacts(ruleContext);
 
     // When compilation_mode=opt and objc_enable_binary_stripping are specified, the unstripped
     // binary containing debug symbols is generated by the linker, which also needs the debug
@@ -806,15 +859,23 @@ public final class CompilationSupport {
     ImmutableList<Artifact> ccLibraries = ccLibraries(objcProvider);
     NestedSet<Artifact> bazelBuiltLibraries = Iterables.isEmpty(prunedJ2ObjcArchives)
         ? objcProvider.get(LIBRARY) : substituteJ2ObjcPrunedLibraries(objcProvider);
+    CommandLine commandLine =
+        linkCommandLine(
+            extraLinkArgs,
+            objcProvider,
+            binaryToLink,
+            dsymBundleZip,
+            ccLibraries,
+            bazelBuiltLibraries,
+            linkmap);
     ruleContext.registerAction(
-        ObjcRuleClasses.spawnXcrunActionBuilder(ruleContext)
+        ObjcRuleClasses.spawnAppleEnvActionBuilder(ruleContext)
             .setMnemonic("ObjcLink")
             .setShellCommand(ImmutableList.of("/bin/bash", "-c"))
-            .setCommandLine(
-                linkCommandLine(extraLinkArgs, objcProvider, binaryToLink, dsymBundle, ccLibraries,
-                    bazelBuiltLibraries))
+            .setCommandLine(new SingleArgCommandLine(commandLine))
             .addOutput(binaryToLink)
-            .addOutputs(dsymBundle.asSet())
+            .addOutputs(dsymBundleZip.asSet())
+            .addOutputs(linkmap.asSet())
             .addTransitiveInputs(bazelBuiltLibraries)
             .addTransitiveInputs(objcProvider.get(IMPORTED_LIBRARY))
             .addTransitiveInputs(objcProvider.get(FRAMEWORK_FILE))
@@ -825,15 +886,22 @@ public final class CompilationSupport {
             .build(ruleContext));
 
     if (objcConfiguration.shouldStripBinary()) {
-      // For test targets, only debug symbols are stripped off, since /usr/bin/strip is not able
-      // to strip off all symbols in XCTest bundle.
-      boolean isTestTarget = TargetUtils.isTestRule(ruleContext.getRule());
-      Iterable<String> stripArgs =
-          isTestTarget ? ImmutableList.of("-S") : ImmutableList.<String>of();
+      final Iterable<String> stripArgs;
+      if (TargetUtils.isTestRule(ruleContext.getRule())) {
+        // For test targets, only debug symbols are stripped off, since /usr/bin/strip is not able
+        // to strip off all symbols in XCTest bundle.
+        stripArgs = ImmutableList.of("-S");
+      } else if (isDynamicLib(commandLine)) {
+        // For dynamic libs must pass "-x" to strip only local symbols.
+        stripArgs = ImmutableList.of("-x");
+      } else {
+        stripArgs = ImmutableList.<String>of();
+      }
+
       Artifact strippedBinary = intermediateArtifacts.strippedSingleArchitectureBinary();
 
       ruleContext.registerAction(
-          ObjcRuleClasses.spawnXcrunActionBuilder(ruleContext)
+          ObjcRuleClasses.spawnAppleEnvActionBuilder(ruleContext)
               .setMnemonic("ObjcBinarySymbolStrip")
               .setExecutable(xcrunwrapper(ruleContext))
               .setCommandLine(symbolStripCommandLine(stripArgs, binaryToLink, strippedBinary))
@@ -852,8 +920,6 @@ public final class CompilationSupport {
   }
 
   private ImmutableList<Artifact> j2objcPrunedLibraries(ObjcProvider objcProvider) {
-    IntermediateArtifacts intermediateArtifacts =
-        ObjcRuleClasses.intermediateArtifacts(ruleContext);
     ImmutableList.Builder<Artifact> j2objcPrunedLibraryBuilder = ImmutableList.builder();
     for (Artifact j2objcLibrary : objcProvider.get(ObjcProvider.J2OBJC_LIBRARY)) {
       j2objcPrunedLibraryBuilder.add(intermediateArtifacts.j2objcPrunedArchive(j2objcLibrary));
@@ -877,8 +943,6 @@ public final class CompilationSupport {
    */
   private NestedSet<Artifact> substituteJ2ObjcPrunedLibraries(ObjcProvider objcProvider) {
     ImmutableList.Builder<Artifact> libraries = new ImmutableList.Builder<>();
-    IntermediateArtifacts intermediateArtifacts =
-        ObjcRuleClasses.intermediateArtifacts(ruleContext);
 
     Set<Artifact> unprunedJ2ObjcLibs = objcProvider.get(ObjcProvider.J2OBJC_LIBRARY).toSet();
     for (Artifact library : objcProvider.get(LIBRARY)) {
@@ -893,13 +957,18 @@ public final class CompilationSupport {
     return NestedSetBuilder.wrap(Order.NAIVE_LINK_ORDER, libraries.build());
   }
 
-  private CommandLine linkCommandLine(ExtraLinkArgs extraLinkArgs,
-      ObjcProvider objcProvider, Artifact linkedBinary, Optional<Artifact> dsymBundle,
-      Iterable<Artifact> ccLibraries, Iterable<Artifact> bazelBuiltLibraries) {
+  private CommandLine linkCommandLine(
+      ExtraLinkArgs extraLinkArgs,
+      ObjcProvider objcProvider,
+      Artifact linkedBinary,
+      Optional<Artifact> dsymBundleZip,
+      Iterable<Artifact> ccLibraries,
+      Iterable<Artifact> bazelBuiltLibraries,
+      Optional<Artifact> linkmap) {
     ObjcConfiguration objcConfiguration = ObjcRuleClasses.objcConfiguration(ruleContext);
     AppleConfiguration appleConfiguration = ruleContext.getFragment(AppleConfiguration.class);
     Iterable<String> libraryNames = libraryNames(objcProvider);
-    
+
     CustomCommandLine.Builder commandLine = CustomCommandLine.builder()
         .addPath(xcrunwrapper(ruleContext).getExecutable().getExecPath());
     if (objcProvider.is(USES_CPP)) {
@@ -947,8 +1016,7 @@ public final class CompilationSupport {
         .addExecPath("-o", linkedBinary)
         .addBeforeEach("-force_load", Artifact.toExecPaths(objcProvider.get(FORCE_LOAD_LIBRARY)))
         .add(extraLinkArgs)
-        .add(objcProvider.get(ObjcProvider.LINKOPT))
-        .build();
+        .add(objcProvider.get(ObjcProvider.LINKOPT));
 
     if (ruleContext.getConfiguration().isCodeCoverageEnabled()) {
       commandLine.add(LINKER_COVERAGE_FLAGS);
@@ -965,24 +1033,34 @@ public final class CompilationSupport {
           .add("-Xlinker").add("@executable_path/Frameworks");
     }
 
+    for (String linkopt : attributes.linkopts()) {
+      commandLine.add("-Wl," + linkopt);
+    }
+
+    if (linkmap.isPresent()) {
+      commandLine
+          .add("-Xlinker -map")
+          .add("-Xlinker " + linkmap.get().getExecPath());
+    }
+
     // Call to dsymutil for debug symbol generation must happen in the link action.
     // All debug symbol information is encoded in object files inside archive files. To generate
     // the debug symbol bundle, dsymutil will look inside the linked binary for the encoded
     // absolute paths to archive files, which are only valid in the link action.
-    if (dsymBundle.isPresent()) {
-      PathFragment dsymPath = FileSystemUtils.removeExtension(dsymBundle.get().getExecPath());
+    if (dsymBundleZip.isPresent()) {
+      PathFragment dsymPath = FileSystemUtils.removeExtension(dsymBundleZip.get().getExecPath());
       commandLine
           .add("&&")
           .addPath(xcrunwrapper(ruleContext).getExecutable().getExecPath())
           .add(DSYMUTIL)
           .add(linkedBinary.getExecPathString())
           .add("-o " + dsymPath)
-          .add("&& zipped_bundle=${PWD}/" + dsymBundle.get().getShellEscapedExecPathString())
+          .add("&& zipped_bundle=${PWD}/" + dsymBundleZip.get().getShellEscapedExecPathString())
           .add("&& cd " + dsymPath)
           .add("&& /usr/bin/zip -q -r \"${zipped_bundle}\" .");
     }
 
-    return new SingleArgCommandLine(commandLine.build());
+    return commandLine.build();
   }
 
   /**
@@ -1048,8 +1126,6 @@ public final class CompilationSupport {
     NestedSet<Artifact> j2ObjcDependencyMappingFiles = provider.getDependencyMappingFiles();
     NestedSet<Artifact> j2ObjcHeaderMappingFiles = provider.getHeaderMappingFiles();
     NestedSet<Artifact> j2ObjcArchiveSourceMappingFiles = provider.getArchiveSourceMappingFiles();
-    IntermediateArtifacts intermediateArtifacts =
-        ObjcRuleClasses.intermediateArtifacts(ruleContext);
 
     for (Artifact j2objcArchive : objcProvider.get(ObjcProvider.J2OBJC_LIBRARY)) {
       PathFragment paramFilePath = FileSystemUtils.replaceExtension(
@@ -1078,7 +1154,7 @@ public final class CompilationSupport {
             paramFile,
             commandLine,
             ParameterFile.ParameterFileType.UNQUOTED, ISO_8859_1));
-        ruleContext.registerAction(ObjcRuleClasses.spawnXcrunActionBuilder(ruleContext)
+        ruleContext.registerAction(ObjcRuleClasses.spawnAppleEnvActionBuilder(ruleContext)
             .setMnemonic("DummyPruner")
             .setExecutable(pruner)
             .addInput(dummyArchive)
@@ -1111,8 +1187,7 @@ public final class CompilationSupport {
 
     // The include directory options ("-I") are parsed out of copts. The include directories are
     // added as non-propagated header search paths local to the associated Xcode target.
-    Iterable<String> copts = Iterables.concat(
-        objcConfiguration.getCopts(), attributes.copts(), attributes.optionsCopts());
+    Iterable<String> copts = Iterables.concat(objcConfiguration.getCopts(), attributes.copts());
     Iterable<String> includeDirOptions = Iterables.filter(copts, INCLUDE_DIR_OPTION_IN_COPTS);
     Iterable<String> coptsWithoutIncludeDirs = Iterables.filter(
         copts, Predicates.not(INCLUDE_DIR_OPTION_IN_COPTS));
@@ -1122,11 +1197,16 @@ public final class CompilationSupport {
       nonPropagatedHeaderSearchPaths.add(new PathFragment(includeDirOption.substring(2)));
     }
 
+    // We also need to add the -isystem directories from the CC header providers. ObjCommon
+    // adds these to the objcProvider, so let's just get them from there.
+    Iterable<PathFragment> includeSystemPaths = common.getObjcProvider().get(INCLUDE_SYSTEM);
+
     xcodeProviderBuilder
         .addHeaders(attributes.hdrs())
         .addHeaders(attributes.textualHdrs())
         .addUserHeaderSearchPaths(ObjcCommon.userHeaderSearchPaths(ruleContext.getConfiguration()))
         .addHeaderSearchPaths("$(WORKSPACE_ROOT)", attributes.headerSearchPaths())
+        .addHeaderSearchPaths("$(WORKSPACE_ROOT)", includeSystemPaths)
         .addHeaderSearchPaths("$(SDKROOT)/usr/include", attributes.sdkIncludes())
         .addNonPropagatedHeaderSearchPaths(
             "$(WORKSPACE_ROOT)", nonPropagatedHeaderSearchPaths.build())
@@ -1173,22 +1253,18 @@ public final class CompilationSupport {
     return this;
   }
 
-  private CompilationSupport registerDsymActions() {
-    IntermediateArtifacts intermediateArtifacts =
-        ObjcRuleClasses.intermediateArtifacts(ruleContext);
+  private CompilationSupport registerDsymActions(DsymOutputType dsymOutputType) {
     ObjcConfiguration objcConfiguration = ObjcRuleClasses.objcConfiguration(ruleContext);
 
-    Artifact dsymBundle = intermediateArtifacts.dsymBundle();
+    Artifact tempDsymBundleZip = intermediateArtifacts.tempDsymBundleZip(dsymOutputType);
     Artifact linkedBinary =
         objcConfiguration.shouldStripBinary()
             ? intermediateArtifacts.unstrippedSingleArchitectureBinary()
             : intermediateArtifacts.strippedSingleArchitectureBinary();
-    Artifact debugSymbolFile = intermediateArtifacts.dsymSymbol();
-    Artifact dsymPlist = intermediateArtifacts.dsymPlist();
+    Artifact debugSymbolFile = intermediateArtifacts.dsymSymbol(dsymOutputType);
+    Artifact dsymPlist = intermediateArtifacts.dsymPlist(dsymOutputType);
 
-    PathFragment dsymOutputDir =
-        replaceSuffix(
-            dsymBundle.getExecPath(), IntermediateArtifacts.TMP_DSYM_BUNDLE_SUFFIX, ".app.dSYM");
+    PathFragment dsymOutputDir = removeSuffix(tempDsymBundleZip.getExecPath(), ".temp.zip");
     PathFragment dsymPlistZipEntry = dsymPlist.getExecPath().relativeTo(dsymOutputDir);
     PathFragment debugSymbolFileZipEntry =
         debugSymbolFile
@@ -1201,13 +1277,13 @@ public final class CompilationSupport {
             .append(
                 String.format(
                     "unzip -p %s %s > %s",
-                    dsymBundle.getExecPathString(),
+                    tempDsymBundleZip.getExecPathString(),
                     dsymPlistZipEntry,
                     dsymPlist.getExecPathString()))
             .append(
                 String.format(
                     " && unzip -p %s %s > %s",
-                    dsymBundle.getExecPathString(),
+                    tempDsymBundleZip.getExecPathString(),
                     debugSymbolFileZipEntry,
                     debugSymbolFile.getExecPathString()));
 
@@ -1215,7 +1291,7 @@ public final class CompilationSupport {
         new SpawnAction.Builder()
             .setMnemonic("UnzipDsym")
             .setShellCommand(unzipDsymCommand.toString())
-            .addInput(dsymBundle)
+            .addInput(tempDsymBundleZip)
             .addOutput(dsymPlist)
             .addOutput(debugSymbolFile)
             .build(ruleContext));
@@ -1237,14 +1313,11 @@ public final class CompilationSupport {
     return this;
   }
 
-  private PathFragment replaceSuffix(PathFragment path, String suffix, String newSuffix) {
-    // TODO(bazel-team): Throw instead of returning null?
+  private PathFragment removeSuffix(PathFragment path, String suffix) {
     String name = path.getBaseName();
-    if (name.endsWith(suffix)) {
-      return path.replaceName(name.substring(0, name.length() - suffix.length()) + newSuffix);
-    } else {
-      return null;
-    }
+    Preconditions.checkArgument(
+        name.endsWith(suffix), "expect %s to end with %s, but it does not", name, suffix);
+    return path.replaceName(name.substring(0, name.length() - suffix.length()));
   }
 
   /**
@@ -1254,7 +1327,7 @@ public final class CompilationSupport {
     // If we have module maps support, we need to use the generated module name, this way
     // clang can properly load objc part of the module via -import-underlying-module command.
     if (ObjcRuleClasses.objcConfiguration(ruleContext).moduleMapsEnabled()) {
-      return ObjcRuleClasses.intermediateArtifacts(ruleContext).moduleMap().getName();
+      return intermediateArtifacts.moduleMap().getName();
     }
     // Otherwise, just use target name, it doesn't matter.
     return ruleContext.getLabel().getName();
@@ -1318,14 +1391,27 @@ public final class CompilationSupport {
         .add("-arch", appleConfiguration.getIosCpu())
         .add("-isysroot", AppleToolchain.sdkDir())
         // TODO(bazel-team): Pass framework search paths to Xcodegen.
+        .addAll(commonFrameworkFlags(provider, appleConfiguration))
+        .build();
+  }
+
+  /**
+   * Returns a list of framework search path flags for clang/swift actions.
+   */
+  private static Iterable<String> commonFrameworkFlags(
+      ObjcProvider provider, AppleConfiguration appleConfiguration) {
+    Platform platform = Platform.forIosArch(appleConfiguration.getIosCpu());
+
+    return new ImmutableList.Builder<String>()
         .add("-F", AppleToolchain.sdkFrameworkDir(platform, appleConfiguration))
         // As of sdk8.1, XCTest is in a base Framework dir
         .add("-F", AppleToolchain.platformDeveloperFrameworkDir(appleConfiguration))
         // Add custom (non-SDK) framework search paths. For each framework foo/bar.framework,
         // include "foo" as a search path.
-        .addAll(Interspersing.beforeEach(
-            "-F",
-            PathFragment.safePathStrings(uniqueParentDirectories(provider.get(FRAMEWORK_DIR)))))
+        .addAll(
+            Interspersing.beforeEach(
+                "-F",
+                PathFragment.safePathStrings(uniqueParentDirectories(provider.get(FRAMEWORK_DIR)))))
         .build();
   }
 

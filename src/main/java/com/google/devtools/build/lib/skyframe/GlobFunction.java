@@ -146,6 +146,7 @@ public final class GlobFunction implements SkyFunction {
       int direntsSize = listingValue.getDirents().size();
       Map<Dirent, SkyKey> symlinkFileMap = Maps.newHashMapWithExpectedSize(direntsSize);
       Map<Dirent, SkyKey> firstPassSubdirMap = Maps.newHashMapWithExpectedSize(direntsSize);
+      Map<Dirent, Object> sortedResultMap = Maps.newTreeMap();
       // First pass: do normal files and collect SkyKeys to request.
       for (Dirent dirent : listingValue.getDirents()) {
         Type direntType = dirent.getType();
@@ -173,7 +174,7 @@ public final class GlobFunction implements SkyFunction {
             firstPassSubdirMap.put(dirent, keyToRequest);
           }
         } else if (globMatchesBareFile) {
-          matches.add(glob.getSubdir().getRelative(fileName));
+          sortedResultMap.put(dirent, glob.getSubdir().getRelative(fileName));
         }
       }
 
@@ -208,7 +209,7 @@ public final class GlobFunction implements SkyFunction {
             symlinkSubdirMap.put(dirent, keyToRequest);
           }
         } else if (globMatchesBareFile) {
-          matches.add(glob.getSubdir().getRelative(fileName));
+          sortedResultMap.put(dirent, glob.getSubdir().getRelative(fileName));
         }
       }
 
@@ -227,7 +228,13 @@ public final class GlobFunction implements SkyFunction {
                 ? secondResult.get(key)
                 : firstPassAndSymlinksResult.get(key);
         Preconditions.checkNotNull(valueRequested, direntAndKey);
-        addSubdirMatchesFromSkyValue(fileName, glob, matches, valueRequested);
+        Object dirMatches = getSubdirMatchesFromSkyValue(fileName, glob, valueRequested);
+        if (dirMatches != null) {
+          sortedResultMap.put(dirent, dirMatches);
+        }
+      }
+      for (Map.Entry<Dirent, Object> fileMatches : sortedResultMap.entrySet()) {
+        addToMatches(fileMatches.getValue(), matches);
       }
     } else {
       // Pattern does not contain globs, so a direct stat is enough.
@@ -246,7 +253,10 @@ public final class GlobFunction implements SkyFunction {
             if (env.valuesMissing()) {
               return null;
             }
-            addSubdirMatchesFromSkyValue(fileName, glob, matches, valueRequested);
+            Object fileMatches = getSubdirMatchesFromSkyValue(fileName, glob, valueRequested);
+            if (fileMatches != null) {
+              addToMatches(fileMatches, matches);
+            }
           }
         } else if (globMatchesBareFile) {
           matches.add(glob.getSubdir().getRelative(fileName));
@@ -269,6 +279,15 @@ public final class GlobFunction implements SkyFunction {
     return pattern.contains("*") || pattern.contains("?");
   }
 
+  @SuppressWarnings("unchecked") // cast to NestedSet<PathFragment>
+  private static void addToMatches(Object toAdd, NestedSetBuilder<PathFragment> matches) {
+    if (toAdd instanceof PathFragment) {
+      matches.add((PathFragment) toAdd);
+    } else {
+      matches.addTransitive((NestedSet<PathFragment>) toAdd);
+    }
+  }
+
   /**
    * Includes the given file/directory in the glob.
    *
@@ -278,7 +297,7 @@ public final class GlobFunction implements SkyFunction {
    *
    * <p>Returns a {@link SkyKey} for a value that is needed to compute the files that will be added
    * to {@code matches}, or {@code null} if no additional value is needed. The returned value should
-   * be opaquely passed to {@link #addSubdirMatchesFromSkyValue}.
+   * be opaquely passed to {@link #getSubdirMatchesFromSkyValue}.
    */
   private static SkyKey getSkyKeyForSubdir(
       String fileName, GlobDescriptor glob, String subdirPattern) {
@@ -308,18 +327,19 @@ public final class GlobFunction implements SkyFunction {
   }
 
   /**
-   * Add matches to {@code matches} coming from the directory {@code fileName} if appropriate.
+   * Returns matches coming from the directory {@code fileName} if appropriate, either an individual
+   * file or a nested set of files.
    *
    * <p>{@code valueRequested} must be the SkyValue whose key was returned by
    * {@link #getSkyKeyForSubdir} for these parameters.
    */
-  private static void addSubdirMatchesFromSkyValue(
+  @Nullable
+  private static Object getSubdirMatchesFromSkyValue(
       String fileName,
       GlobDescriptor glob,
-      NestedSetBuilder<PathFragment> matches,
       SkyValue valueRequested) {
     if (valueRequested instanceof GlobValue) {
-      matches.addTransitive(((GlobValue) valueRequested).getMatches());
+      return ((GlobValue) valueRequested).getMatches();
     } else {
       Preconditions.checkState(
           valueRequested instanceof PackageLookupValue,
@@ -328,9 +348,10 @@ public final class GlobFunction implements SkyFunction {
           fileName,
           glob);
       if (!((PackageLookupValue) valueRequested).packageExists()) {
-        matches.add(glob.getSubdir().getRelative(fileName));
+        return glob.getSubdir().getRelative(fileName);
       }
     }
+    return null;
   }
 
   @Nullable

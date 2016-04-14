@@ -442,11 +442,31 @@ public class MethodLibraryTest extends EvaluationTestCase {
   }
 
   @Test
+  public void testGetAttrMissingField() throws Exception {
+    new SkylarkTest()
+        .testIfExactError(
+            "Object of type 'string' has no attribute \"not_there\"",
+            "getattr('a string', 'not_there')")
+        .testStatement("getattr('a string', 'not_there', 'use this')", "use this");
+  }
+
+  @Test
+  public void testGetAttrWithMethods() throws Exception {
+    String msg =
+        "Object of type 'string' has no attribute \"count\", however, "
+            + "a method of that name exists";
+    new SkylarkTest()
+        .testIfExactError(msg, "getattr('a string', 'count')")
+        .testIfExactError(msg, "getattr('a string', 'count', 'unused default')");
+  }
+
+  @Test
   public void testDir() throws Exception {
-    new SkylarkTest().testStatement(
-        "str(dir({}))",
-        "[\"$index\", \"clear\", \"get\", \"items\", \"keys\","
-        + " \"pop\", \"popitem\", \"setdefault\", \"values\"]");
+    new SkylarkTest()
+        .testStatement(
+            "str(dir({}))",
+            "[\"$index\", \"clear\", \"get\", \"items\", \"keys\","
+                + " \"pop\", \"popitem\", \"setdefault\", \"update\", \"values\"]");
   }
 
   @Test
@@ -1360,6 +1380,16 @@ public class MethodLibraryTest extends EvaluationTestCase {
   }
 
   @Test
+  public void testDictionaryUpdate() throws Exception {
+    new BothModesTest()
+        .setUp("foo = {'a': 2}")
+        .testEval("foo.update({'b': 4}); foo", "{'a': 2, 'b': 4}");
+    new BothModesTest()
+        .setUp("foo = {'a': 2}")
+        .testEval("foo.update({'a': 3, 'b': 4}); foo", "{'a': 3, 'b': 4}");
+  }
+
+  @Test
   public void testDictionarySetDefault() throws Exception {
     new SkylarkTest()
         .testEval(
@@ -1500,6 +1530,22 @@ public class MethodLibraryTest extends EvaluationTestCase {
 
   @Test
   public void testPyListAppend() throws Exception {
+    new BuildTest()
+        .setUp("FOO = ['a', 'b']", "FOO.insert(0, 'c')")
+        .testLookup("FOO", MutableList.of(env, "c", "a", "b"))
+        .setUp("FOO.insert(1, 'd')")
+        .testLookup("FOO", MutableList.of(env, "c", "d", "a", "b"))
+        .setUp("FOO.insert(4, 'e')")
+        .testLookup("FOO", MutableList.of(env, "c", "d", "a", "b", "e"))
+        .setUp("FOO.insert(-10, 'f')")
+        .testLookup("FOO", MutableList.of(env, "f", "c", "d", "a", "b", "e"))
+        .setUp("FOO.insert(10, 'g')")
+        .testLookup("FOO", MutableList.of(env, "f", "c", "d", "a", "b", "e", "g"))
+        .testIfErrorContains("Type tuple has no function insert(int)", "(1, 2).insert(3)");
+  }
+
+  @Test
+  public void testPyListInsert() throws Exception {
     new BuildTest()
         .setUp("FOO = ['a', 'b']", "FOO.append('c')")
         .testLookup("FOO", MutableList.of(env, "a", "b", "c"))
